@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OmniMeet WebSocket Events Contract",
+  "description": "Event schema definition for bidirectional audio streaming, real-time cross-language subtitles, and Copilot events.",
+  "version": "1.0.0",
+  "definitions": {
+    "AudioChunkPayload": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["audio_chunk"] },
+        "roomId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "sourceLanguage": { "type": "string", "description": "e.g., 'hi', 'es', 'fr', 'ta', 'en'" },
+        "sampleRate": { "type": "integer", "default": 16000 },
+        "channels": { "type": "integer", "default": 1 },
+        "encoding": { "type": "string", "enum": ["pcm_s16le", "pcm_f32le", "base64_pcm"] },
+        "data": { "type": "string", "description": "Base64 encoded raw PCM audio bytes" },
+        "timestamp": { "type": "number", "description": "Epoch millisecond timestamp" }
+      },
+      "required": ["type", "roomId", "senderId", "data", "timestamp"]
+    },
+    "SubtitleStreamPayload": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["subtitle_stream"] },
+        "roomId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "sourceLanguage": { "type": "string" },
+        "targetLanguage": { "type": "string" },
+        "isFinal": { "type": "boolean", "description": "false for interim/sliding-window hypotheses, true when speech segment finalized" },
+        "originalText": { "type": "string" },
+        "translatedText": { "type": "string" },
+        "latencyMs": { "type": "number", "description": "End-to-end processing latency in milliseconds" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["type", "roomId", "senderId", "isFinal", "translatedText", "timestamp"]
+    },
+    "ActionItemPayload": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["action_item"] },
+        "id": { "type": "string" },
+        "roomId": { "type": "string" },
+        "task": { "type": "string" },
+        "assignee": { "type": "string" },
+        "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
+        "dueContext": { "type": "string" },
+        "sourceQuote": { "type": "string" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["type", "id", "roomId", "task", "assignee", "priority", "timestamp"]
+    },
+    "MeetingSummaryPayload": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["meeting_summary"] },
+        "roomId": { "type": "string" },
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "keyDecisions": { "type": "array", "items": { "type": "string" } },
+        "actionItems": { "type": "array", "items": { "$ref": "#/definitions/ActionItemPayload" } },
+        "generatedAt": { "type": "string" }
+      },
+      "required": ["type", "roomId", "summary", "generatedAt"]
+    },
+    "RoomEventPayload": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["room_event"] },
+        "event": { "type": "string", "enum": ["user_joined", "user_left", "language_switched", "mute_toggle"] },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "preferredLanguage": { "type": "string" },
+        "participants": { "type": "array", "items": { "type": "object" } },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["type", "event", "userId", "timestamp"]
+    }
+  }
+}
