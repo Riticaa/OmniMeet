@@ -22,10 +22,13 @@ class ASREngine:
             from faster_whisper import WhisperModel
             print(f"[*] Loading Faster-Whisper ({self.model_size} on {self.device}, {self.compute_type})...")
             self.model = WhisperModel(self.model_size, device=self.device, compute_type=self.compute_type)
-            print("[✓] Faster-Whisper initialized successfully.")
+            print("[OK] Faster-Whisper initialized successfully.")
         except Exception as e:
             print(f"[!] Faster-Whisper load deferred ({e}). Demo/mock speech recognizer active.")
             self.model = None
+
+    def is_ready(self) -> bool:
+        return self.model is not None
 
     def transcribe(self, audio_data: np.ndarray, language: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -63,12 +66,22 @@ class ASREngine:
                 }
             except Exception as e:
                 print(f"[!] ASR transcription error: {e}")
+                return {
+                    "text": "",
+                    "language": language or "en",
+                    "confidence": 0.0,
+                    "latency_ms": (time.time() - start_time) * 1000,
+                    "duration_sec": duration,
+                    "error": str(e)
+                }
 
-        # Fallback simulation for dry-runs / offline tests
+        # Faster-Whisper model is not installed or loaded on host
         return {
-            "text": "Meeting discussion audio segment received.",
+            "text": "",
             "language": language or "en",
-            "confidence": 0.95,
+            "confidence": 0.0,
             "latency_ms": (time.time() - start_time) * 1000,
-            "duration_sec": duration
+            "duration_sec": duration,
+            "error": "Faster-Whisper model not loaded on server"
         }
+

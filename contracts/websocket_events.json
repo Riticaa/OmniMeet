@@ -48,9 +48,25 @@
         "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
         "dueContext": { "type": "string" },
         "sourceQuote": { "type": "string" },
+        "completed": { "type": "boolean", "default": false },
+        "isDemo": { "type": "boolean", "default": false },
         "timestamp": { "type": "number" }
       },
       "required": ["type", "id", "roomId", "task", "assignee", "priority", "timestamp"]
+    },
+    "ActionItemUpdatePayload": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["action_item_update"] },
+        "id": { "type": "string" },
+        "roomId": { "type": "string" },
+        "completed": { "type": "boolean" },
+        "task": { "type": "string" },
+        "assignee": { "type": "string" },
+        "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["type", "id", "roomId"]
     },
     "MeetingSummaryPayload": {
       "type": "object",
@@ -73,10 +89,83 @@
         "userId": { "type": "string" },
         "userName": { "type": "string" },
         "preferredLanguage": { "type": "string" },
+        "targetLanguage": { "type": "string" },
         "participants": { "type": "array", "items": { "type": "object" } },
         "timestamp": { "type": "number" }
       },
       "required": ["type", "event", "userId", "timestamp"]
+    },
+    "RoomStatePayload": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["room_state"] },
+        "roomId": { "type": "string" },
+        "participants": { "type": "array", "items": { "type": "object" } },
+        "transcripts": { "type": "array", "items": { "$ref": "#/definitions/SubtitleStreamPayload" } },
+        "actionItems": { "type": "array", "items": { "$ref": "#/definitions/ActionItemPayload" } },
+        "aiPipelineActive": { "type": "boolean" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["type", "roomId", "participants", "transcripts", "actionItems"]
+    },
+    "WebRTCSignalingPayload": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["webrtc_offer", "webrtc_answer", "webrtc_ice_candidate"] },
+        "roomId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "targetUserId": { "type": "string" },
+        "sdp": { "type": "object", "description": "RTCSessionDescriptionInit" },
+        "candidate": { "type": "object", "description": "RTCIceCandidateInit" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["type", "roomId", "senderId", "targetUserId"]
+    },
+    "PeerStateUpdatePayload": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["peer_state_update"] },
+        "roomId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "isMuted": { "type": "boolean" },
+        "isCameraOn": { "type": "boolean" },
+        "isScreenSharing": { "type": "boolean" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["type", "roomId", "senderId"]
+    },
+    "ChatMessagePayload": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["chat_message"] },
+        "roomId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "text": { "type": "string" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["type", "roomId", "senderId", "text"]
+    },
+    "CopilotQueryPayload": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["copilot_query"] },
+        "roomId": { "type": "string" },
+        "query": { "type": "string" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["type", "roomId", "query"]
+    },
+    "CopilotAnswerPayload": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["copilot_answer"] },
+        "roomId": { "type": "string" },
+        "query": { "type": "string" },
+        "answer": { "type": "string" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["type", "answer"]
     }
   }
 }

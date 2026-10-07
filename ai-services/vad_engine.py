@@ -30,7 +30,7 @@ class VADEngine:
             )
             self.silero_model = model
             self.get_speech_timestamps = utils[0]
-            print("[✓] Silero VAD initialized successfully.")
+            print("[OK] Silero VAD initialized successfully.")
         except Exception as e:
             print(f"[!] Silero VAD model load deferred ({e}). Falling back to Adaptive Energy VAD.")
             self.use_fallback = True

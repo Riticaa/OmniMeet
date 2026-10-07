@@ -16,16 +16,31 @@ from translator_engine import TranslationEngine
 class OmniMeetAIPipeline:
     def __init__(self, target_lang: str = "en", asr_model_size: str = "base"):
         self.target_lang = target_lang
-        self.vad_accumulator = SpeechSegmentAccumulator()
+        self.accumulators: Dict[str, SpeechSegmentAccumulator] = {}
         self.asr = ASREngine(model_size=asr_model_size)
         self.translator = TranslationEngine(default_target_lang=target_lang)
+
+    def is_asr_loaded(self) -> bool:
+        """Returns True if the underlying ASR model is loaded and ready for live audio."""
+        return self.asr.is_ready()
+
+    def cleanup_speaker(self, speaker_id: str):
+        """Release audio buffer and VAD accumulator when a participant disconnects."""
+        if speaker_id in self.accumulators:
+            del self.accumulators[speaker_id]
+
+    def translate_text(self, text: str, source_lang: str = "auto", target_lang: str = "en") -> str:
+        """Translates single text string directly."""
+        res = self.translator.translate(text=text, source_lang=source_lang, target_lang=target_lang)
+        return res.get("translated_text", text)
 
     def process_raw_pcm_chunk(
         self,
         pcm_bytes: bytes,
         speaker_id: str = "local_user",
         speaker_name: str = "User",
-        source_lang: str = "auto"
+        source_lang: str = "auto",
+        target_langs: Optional[list] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Ingests a raw 16-bit 16kHz PCM audio chunk (e.g., 512-2048 samples).
@@ -37,8 +52,13 @@ class OmniMeetAIPipeline:
         # Convert bytes to int16 numpy array
         chunk_i16 = np.frombuffer(pcm_bytes, dtype=np.int16)
 
+        # Get or create speaker-specific VAD accumulator
+        if speaker_id not in self.accumulators:
+            self.accumulators[speaker_id] = SpeechSegmentAccumulator()
+        accumulator = self.accumulators[speaker_id]
+
         # Push to VAD segmenter
-        speech_segment = self.vad_accumulator.push_chunk(chunk_i16)
+        speech_segment = accumulator.push_chunk(chunk_i16)
 
         if speech_segment is not None:
             # 1. Transcribe speech
@@ -50,15 +70,22 @@ class OmniMeetAIPipeline:
 
             detected_lang = asr_res.get("language", source_lang)
 
-            # 2. Translate to target language
-            trans_res = self.translator.translate(
-                text=text,
-                source_lang=detected_lang,
-                target_lang=self.target_lang
-            )
-            translated_text = trans_res.get("translated_text", text)
+            # 2. Determine target languages to translate for
+            targets = set(target_langs) if target_langs else set()
+            targets.add(self.target_lang)
+            targets.add("en")
 
-            total_latency = (time.time() - start_ts) * 1000 + asr_res.get("latency_ms", 0) + trans_res.get("latency_ms", 0)
+            translations = {}
+            for tgt in targets:
+                trans_res = self.translator.translate(
+                    text=text,
+                    source_lang=detected_lang,
+                    target_lang=tgt
+                )
+                translations[tgt] = trans_res.get("translated_text", text)
+
+            default_translation = translations.get(self.target_lang, text)
+            total_latency = (time.time() - start_ts) * 1000 + asr_res.get("latency_ms", 0)
 
             # 3. Format into standardized WebSocket contract event
             return {
@@ -68,11 +95,13 @@ class OmniMeetAIPipeline:
                 "senderName": speaker_name,
                 "sourceLanguage": detected_lang,
                 "targetLanguage": self.target_lang,
+                "translations": translations,
                 "isFinal": True,
                 "originalText": text,
-                "translatedText": translated_text,
+                "translatedText": default_translation,
                 "latencyMs": round(total_latency, 1),
                 "timestamp": int(time.time() * 1000)
             }
 
         return None
+

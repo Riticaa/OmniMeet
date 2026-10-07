@@ -27,7 +27,7 @@ class TranslationEngine:
             model = MarianMTModel.from_pretrained(model_name)
             self.models[pair] = model
             self.tokenizers[pair] = tokenizer
-            print(f"[✓] Loaded {pair} translator.")
+            print(f"[OK] Loaded {pair} translator.")
             return model, tokenizer
         except Exception as e:
             # Model loading deferred or unavailable
@@ -78,7 +78,7 @@ class TranslationEngine:
             except Exception as e:
                 print(f"[!] Translation inference error: {e}")
 
-        # Lightweight fallback: Deep Translator / Google Translate Web fallback if installed
+        # Lightweight fallback: Deep Translator if installed
         try:
             from deep_translator import GoogleTranslator
             translated = GoogleTranslator(source=norm_src if norm_src != 'auto' else 'auto', target=target_lang).translate(text)
@@ -88,6 +88,29 @@ class TranslationEngine:
                 "target_lang": target_lang,
                 "latency_ms": (time.time() - start_time) * 1000
             }
+        except Exception:
+            pass
+
+        # Standard HTTP translation fallback for real end-to-end translations without heavy models
+        try:
+            import urllib.request
+            import urllib.parse
+            import json
+            sl = norm_src if norm_src != 'auto' else 'auto'
+            tl = target_lang.lower()
+            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={sl}&tl={tl}&dt=t&q={urllib.parse.quote(text)}"
+            req = urllib.request.Request(url, headers={"User-Agent": "OmniMeet/1.0"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                if data and data[0]:
+                    translated_str = "".join([seg[0] for seg in data[0] if seg and seg[0]])
+                    if translated_str:
+                        return {
+                            "translated_text": translated_str,
+                            "source_lang": norm_src,
+                            "target_lang": target_lang,
+                            "latency_ms": (time.time() - start_time) * 1000
+                        }
         except Exception:
             pass
 
@@ -104,7 +127,7 @@ class TranslationEngine:
             "merci": "thank you"
         }
 
-        translated_fallback = demo_dict.get(text.lower(), f"[Translated from {source_lang.upper()}]: {text}")
+        translated_fallback = demo_dict.get(text.lower(), f"[Translated to {target_lang.upper()}]: {text}")
 
         return {
             "translated_text": translated_fallback,
@@ -112,3 +135,4 @@ class TranslationEngine:
             "target_lang": target_lang,
             "latency_ms": (time.time() - start_time) * 1000
         }
+
