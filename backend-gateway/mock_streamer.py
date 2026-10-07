@@ -7,8 +7,16 @@ triggering automatic Copilot action item extraction.
 
 import asyncio
 import json
+import sys
 import time
 import websockets
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 DEMO_SCRIPT = [
     {
@@ -58,7 +66,7 @@ async def run_mock_stream(room_id: str = "demo", ws_url: str = "ws://localhost:8
 
     try:
         async with websockets.connect(url) as ws:
-            print("[✓] Connected to OmniMeet Gateway! Starting multilingual stream simulation...\n")
+            print("[OK] Connected to OmniMeet Gateway! Starting multilingual stream simulation...\n")
 
             for turn in DEMO_SCRIPT:
                 speaker = turn["speaker"]
@@ -85,7 +93,7 @@ async def run_mock_stream(room_id: str = "demo", ws_url: str = "ws://localhost:8
                     tag = "[FINAL]" if is_final else "[INTERIM]"
                     print(f" {tag} {speaker} ({lang.upper()} -> EN): {trans}")
 
-            print("\n[✓] Simulation completed successfully!")
+            print("\n[OK] Simulation completed successfully!")
 
     except Exception as e:
         print(f"[!] Connection failed: {e}")
