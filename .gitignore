@@ -31,9 +31,22 @@ wheels/
 .cache/
 huggingface/
 
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+backend-gateway/.env
+backend-gateway/.env.*
+!backend-gateway/.env.example
+
 # IDE & System
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 *.log
+
+# Databases
+*.db*
+*.sqlite*
+

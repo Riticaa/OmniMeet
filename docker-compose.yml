@@ -1,0 +1,42 @@
+version: "3.8"
+
+services:
+  # OmniMeet Gateway & Web Frontend
+  omnimeet:
+    build:
+      context: .
+      dockerfile: backend-gateway/Dockerfile
+    container_name: omnimeet-gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - HOST=0.0.0.0
+      - SQLITE_DB_PATH=/app/data/omnimeet.db
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}
+      - LIVEKIT_URL=ws://livekit:7880
+      - LIVEKIT_API_KEY=devkey
+      - LIVEKIT_API_SECRET=secret
+      - MEDIA_TRANSPORT_MODE=sfu
+    volumes:
+      - omnimeet-data:/app/data
+    depends_on:
+      - livekit
+
+  # LiveKit SFU (Selective Forwarding Unit) Server for Multi-User Media Transport
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: omnimeet-livekit-sfu
+    restart: unless-stopped
+    command: --dev
+    ports:
+      - "7880:7880"         # Signaling & HTTP
+      - "7881:7881"         # RTC TCP fallback
+      - "7882:7882/udp"     # RTC UDP media
+    environment:
+      - LIVEKIT_KEYS="devkey: secret"
+
+volumes:
+  omnimeet-data:
