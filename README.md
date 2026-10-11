@@ -99,9 +99,14 @@ Set environment variables in a local `.env` file (copy `.env.example` as a start
 | `LIVEKIT_API_SECRET` | LiveKit signing secret | Keep secret outside source control |
 | `GEMINI_API_KEY` | Optional Gemini copilot key | Omit to use the available fallback behavior |
 | `GEMINI_MODEL` | Gemini model name | `gemini-3.5-flash` |
+| `GOOGLE_TRANSLATE_API_KEY` | Google Cloud Translation Basic API key | Required for dependable hosted translation; configure only on the server |
 | `TURN_SERVER_URL`, `TURN_USERNAME`, `TURN_CREDENTIAL` | Optional TURN credentials for mesh fallback | Configure only with a TURN provider |
 
 The full variable template is in `.env.example`. Keep production values in Render's environment-variable settings, not in GitHub.
+
+### Enable translated subtitles
+
+For real translated captions, create a Google Cloud project, enable the Cloud Translation API, configure billing, and create an API key restricted to that API. Set `GOOGLE_TRANSLATE_API_KEY` in your local `.env` file or the Render service's environment settings. The key is used by the gateway and is never sent to meeting participants' browsers. Without a provider key or network access, OmniMeet still shows the source caption and marks the translation as unavailable. See Google's [Cloud Translation setup](https://cloud.google.com/translate/docs/setup) and [API authentication guide](https://cloud.google.com/translate/docs/authentication).
 
 ## Deploy to Render
 
@@ -109,7 +114,7 @@ The repository includes `render.yaml`, a Render Blueprint for one Docker web ser
 
 1. Push the project, including `render.yaml`, to a GitHub repository.
 2. In Render, create a **New Blueprint Instance** and select that repository and branch.
-3. Provide `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` when Render prompts for the Blueprint secrets. Use the public `wss://` URL from LiveKit Cloud; do not use the local Docker hostname.
+3. Provide `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` when Render prompts for the Blueprint secrets. To enable translated captions, also provide `GOOGLE_TRANSLATE_API_KEY`. Use the public `wss://` URL from LiveKit Cloud; do not use the local Docker hostname.
 4. Deploy and wait for the `/health` check to pass. Open the assigned `https://<service-name>.onrender.com` URL, create a meeting, then share that meeting's generated URL.
 5. Optionally set `GEMINI_API_KEY` in the Render service settings. For a custom domain, configure it in Render and set `PUBLIC_APP_URL` to its HTTPS origin.
 
