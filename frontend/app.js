@@ -29,6 +29,7 @@ const state = {
   roomId: initialRoomId,
   meetingCode: initialRoomId,
   meetingId: null,
+  publicAppUrl: "",
   userId: "usr_" + Math.random().toString(36).substring(2, 9),
   userName: "Alex Morgan",
   userInitials: "AM",
@@ -44,6 +45,7 @@ const state = {
   speechRecognition: null,
   isRecognizing: false,
   isConnected: false,
+  isJoining: false,
   isMuted: false,
   isCameraOn: false,
   isScreenSharing: false,
@@ -66,6 +68,7 @@ const state = {
   actionItems: [],       // Array of real action item objects
   transcripts: [],       // Array of real transcript objects
   chatMessages: [],      // Array of room-scoped persistent chat messages
+  copilotPendingRequests: {}, // requestId -> timeout handle
   demoActionItems: [],   // Isolated demo action items
   demoTranscripts: [],   // Isolated demo transcripts
   activeSearchQuery: "",
@@ -82,7 +85,9 @@ const state = {
   },
   aiPipelineStatus: {
     initialized: false,
-    asrLoaded: false
+    asrLoaded: false,
+    loading: false,
+    error: null
   }
 };
 
@@ -301,23 +306,36 @@ function updateThemeIcons() {
 //  INITIALIZATION
 // ============================================================
 function init() {
-  initTheme();
-  setupEventListeners();
-  setupSpeechSynthesis();
-  initRoomBroadcast();
-  setupWebSpeechRecognition();
-  enumerateMediaDevices();
+  try {
+    // Attach controls first so optional browser APIs cannot leave the page inert.
+    setupEventListeners();
+    initTheme();
+    setupSpeechSynthesis();
+    setupWebSpeechRecognition();
+    try { initRoomBroadcast(); } catch (err) { console.warn("[Room] Same-browser presence is unavailable:", err); }
+    loadPublicAppConfig();
 
-  // Initialize display name from inputs or default
-  if (homeUserNameInput) state.userName = homeUserNameInput.value || "Alex Morgan";
-  if (homeUserLangSelect) state.sourceLang = homeUserLangSelect.value || "en";
-  updateUserAvatar();
-
-  // If page was loaded with a room code in URL (/meet/{code} or ?room=...), route to lobby
-  if (urlRoomId) {
-    validateAndOpenRoom(urlRoomId, false);
-  } else {
+    // Initialize display name from inputs or default
+    if (homeUserNameInput) state.userName = homeUserNameInput.value || "Alex Morgan";
+    if (homeUserLangSelect) state.sourceLang = homeUserLangSelect.value || "en";
+    updateUserAvatar();
     switchMainView("home");
+
+    // Device discovery must not prevent the meeting screens from initializing.
+    enumerateMediaDevices().catch((err) => console.warn("[Media] Device discovery failed:", err));
+
+    // If page was loaded with a room code, validate it and open the lobby.
+    if (urlRoomId) {
+      validateAndOpenRoom(urlRoomId, false).then((valid) => {
+        if (!valid) {
+          window.history.replaceState({}, "", "/");
+          showToast("That meeting link is invalid or the meeting has ended.");
+        }
+      });
+    }
+  } catch (err) {
+    console.error("[App] Startup failed:", err);
+    showToast(`The app could not finish starting: ${err.message || err}`);
   }
 }
 
@@ -389,9 +407,7 @@ function connectWebSocket() {
     state.wsReconnectTimer = null;
   }
   if (state.ws) {
-    const previousSocket = state.ws;
-    state.ws = null;
-    try { previousSocket.close(); } catch (e) {}
+    try { state.ws.close(); } catch (e) {}
   }
 
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -413,6 +429,7 @@ function connectWebSocket() {
       state.wsHasConnected = true;
       state.isConnected = true;
       updateConnectionStatus("online");
+      refreshAiPipelineStatus();
       broadcastLocalPeerState();
     };
 
@@ -431,6 +448,7 @@ function connectWebSocket() {
       state.isConnected = false;
       const shouldReconnect = state.currentView === "meeting";
       updateConnectionStatus(shouldReconnect ? "reconnecting" : "offline");
+      // Clean up remote peer WebRTC connections
       cleanupAllPeerConnections();
       if (shouldReconnect) {
         if (state.wsHasConnected) showToast("Connection interrupted. Reconnecting to the meeting…");
@@ -485,6 +503,26 @@ function updateConnectionStatus(status) {
   }
 }
 
+async function refreshAiPipelineStatus() {
+  try {
+    const response = await fetch("/health", { cache: "no-store" });
+    if (!response.ok) return;
+    const status = await response.json();
+    state.aiPipelineStatus = {
+      initialized: Boolean(status.ai_pipeline_active),
+      asrLoaded: Boolean(status.asr_model_loaded),
+      loading: Boolean(status.ai_pipeline_loading),
+      error: status.ai_pipeline_error || null
+    };
+    updatePipelineStatusIndicator();
+    if (state.isConnected && state.aiPipelineStatus.loading) {
+      setTimeout(refreshAiPipelineStatus, 2500);
+    }
+  } catch (err) {
+    console.warn("[AI] Could not refresh speech pipeline status:", err);
+  }
+}
+
 // Server Event Dispatcher
 async function handleServerEvent(data) {
   switch (data.type) {
@@ -534,6 +572,10 @@ async function handleServerEvent(data) {
       break;
 
     case "copilot_answer":
+      if (data.requestId && state.copilotPendingRequests[data.requestId]) {
+        cancelCopilotRequest(data.requestId);
+        delete state.copilotPendingRequests[data.requestId];
+      }
       renderCopilotMessage(data.answer, "bot");
       break;
   }
@@ -544,6 +586,7 @@ function handleRoomState(data) {
   if (data.aiPipeline) {
     state.aiPipelineStatus = data.aiPipeline;
     updatePipelineStatusIndicator();
+    syncSpeechRecognitionMode();
   }
 
   // 2. Persistent Chat Messages
@@ -589,7 +632,7 @@ function handleRoomState(data) {
         isScreenSharing: p.isScreenSharing
       });
 
-      // Initiate P2P only when the SFU is not active.
+      // Mesh connections are only needed when the SFU is unavailable.
       if (state.mediaTransportMode !== "sfu") initiatePeerConnection(p.userId);
     }
   });
@@ -605,7 +648,7 @@ function handleRoomEvent(data) {
       lang: data.preferredLanguage,
       targetLang: data.targetLanguage
     });
-    // Use the SFU exclusively while it is active.
+    // Avoid a redundant mesh connection while connected through the SFU.
     if (state.mediaTransportMode !== "sfu") initiatePeerConnection(data.userId);
     showToast(`${data.userName || "A participant"} joined the room`);
   } else if (data.event === "user_left" && data.userId !== state.userId) {
@@ -623,6 +666,10 @@ function updatePipelineStatusIndicator() {
   if (!speechRecognitionStatus) return;
   if (state.aiPipelineStatus.asrLoaded) {
     speechRecognitionStatus.textContent = "AI Speech Pipeline active (Faster-Whisper INT8)";
+  } else if (state.aiPipelineStatus.loading) {
+    speechRecognitionStatus.textContent = "Loading local speech models; browser speech recognition remains available.";
+  } else if (state.aiPipelineStatus.error) {
+    speechRecognitionStatus.textContent = "Local speech pipeline unavailable; using browser speech recognition.";
   } else {
     speechRecognitionStatus.textContent = "Web Speech recognition active • Multi-language translation ready";
   }
@@ -700,7 +747,8 @@ function attachLocalTracksToPC(pc) {
 }
 
 async function initiatePeerConnection(peerId) {
-  // One stable caller per peer pair prevents simultaneous SDP offers on reconnect.
+  // Have exactly one participant create the offer for each pair. Without a
+  // deterministic caller, simultaneous joins/reconnects can cause SDP glare.
   if (String(state.userId).localeCompare(String(peerId)) > 0) return;
   try {
     const pc = createPeerConnection(peerId);
@@ -988,12 +1036,7 @@ async function toggleMicrophone() {
     await startAudioCapture();
     await syncLiveKitLocalTrack("audio", state.mediaStream?.getAudioTracks()[0] || null);
 
-    if (state.speechRecognition && !state.isRecognizing) {
-      try {
-        state.speechRecognition.start();
-        state.isRecognizing = true;
-      } catch (err) {}
-    }
+    syncSpeechRecognitionMode();
   } else {
     state.isMuted = true;
     toggleMicBtn?.classList.add("muted-state");
@@ -1005,12 +1048,7 @@ async function toggleMicrophone() {
     await syncLiveKitLocalTrack("audio", null);
     stopAudioCapture();
 
-    if (state.speechRecognition && state.isRecognizing) {
-      try {
-        state.speechRecognition.stop();
-        state.isRecognizing = false;
-      } catch (err) {}
-    }
+    syncSpeechRecognitionMode();
   }
 
   broadcastLocalPeerState();
@@ -1021,7 +1059,8 @@ async function startAudioCapture() {
     const audioConstraints = {
       audio: micSelect && micSelect.value !== "default" ? { deviceId: { exact: micSelect.value } } : true
     };
-    const stream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+    const existingAudio = state.mediaStream?.active && state.mediaStream.getAudioTracks().some((track) => track.readyState === "live");
+    const stream = existingAudio ? state.mediaStream : await navigator.mediaDevices.getUserMedia(audioConstraints);
     state.mediaStream = stream;
 
     // Add audio track to active WebRTC peer connections
@@ -1037,7 +1076,9 @@ async function startAudioCapture() {
     });
 
     // 16kHz PCM streaming for server VAD/ASR
-    state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    if (!state.audioContext || state.audioContext.state === "closed") {
+      state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
     const source = state.audioContext.createMediaStreamSource(stream);
     const processor = state.audioContext.createScriptProcessor(4096, 1, 1);
     state.audioProcessor = processor;
@@ -1056,7 +1097,7 @@ async function startAudioCapture() {
           senderId: state.userId,
           senderName: state.userName,
           sourceLanguage: state.sourceLang,
-          data: base64Audio,
+          audioData: base64Audio,
           timestamp: Date.now()
         }));
       }
@@ -1234,6 +1275,7 @@ async function syncLiveKitLocalTrack(kind, track) {
   const published = state.livekitPublishedTracks || (state.livekitPublishedTracks = {});
   const previous = published[kind];
   if (previous === track) return;
+
   try {
     if (previous) {
       await room.localParticipant.unpublishTrack(previous);
@@ -1295,35 +1337,33 @@ async function handleSendLiveSpeech() {
 }
 
 async function broadcastSpeechUtterance(originalText, sourceLang) {
-  // Translate locally as immediate optimistic update for self
+  // Translate locally for an immediate subtitle, then let the gateway fan out
+  // and persist the speech utterance for everyone else in the room.
   const translated = await translateText(originalText, sourceLang, state.targetLang);
 
   const payload = {
-    type: "subtitle_stream",
+    type: "speech_utterance",
     roomId: state.roomId,
     senderId: state.userId,
     senderName: state.userName,
     sourceLanguage: sourceLang,
     targetLanguage: state.targetLang,
+    text: originalText,
     originalText: originalText,
     translatedText: translated,
+    translations: { [state.targetLang]: translated },
     isFinal: true,
     timestamp: Date.now()
   };
 
-  // Broadcast to other tabs in the room via BroadcastChannel
-  if (state.broadcastChannel) {
-    state.broadcastChannel.postMessage(payload);
-  }
+  renderConversationItem(payload);
+  if (state.broadcastChannel) state.broadcastChannel.postMessage({ ...payload, type: "subtitle_stream" });
 
   // Send via WebSocket to backend (which translates per user and saves to room data)
   if (state.ws && state.isConnected) {
     try {
       state.ws.send(JSON.stringify(payload));
     } catch (e) {}
-  } else {
-    // In disconnected local mode, render locally
-    renderConversationItem(payload);
   }
 }
 
@@ -1646,33 +1686,84 @@ function createManualActionItem(task, assignee, priority) {
 // ============================================================
 
 function submitCopilotQuestion(query) {
+  query = String(query || "").trim();
   if (!query) return;
   renderCopilotMessage(query, "user");
+  const requestId = `copilot_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const roomAtRequest = state.roomId;
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort();
+    delete state.copilotPendingRequests[requestId];
+    renderCopilotMessage(localCopilotAnswer(query), "bot");
+  }, 27000);
+  state.copilotPendingRequests[requestId] = { controller, timer };
 
-  if (state.ws && state.isConnected) {
-    state.ws.send(JSON.stringify({
-      type: "copilot_query",
-      roomId: state.roomId,
-      query: query,
-      timestamp: Date.now()
-    }));
+  fetch(`/api/rooms/${encodeURIComponent(roomAtRequest)}/copilot/ask`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+    signal: controller.signal
+  }).then(async (response) => {
+    if (!response.ok) throw new Error(`Copilot request failed (${response.status})`);
+    return response.json();
+  }).then((result) => {
+    const pending = state.copilotPendingRequests[requestId];
+    if (!pending || state.roomId !== roomAtRequest) return;
+    clearTimeout(pending.timer);
+    delete state.copilotPendingRequests[requestId];
+    renderCopilotMessage(result.answer || "OmniCopilot could not produce an answer.", "bot");
+  }).catch((err) => {
+    const pending = state.copilotPendingRequests[requestId];
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    delete state.copilotPendingRequests[requestId];
+    console.warn("[Copilot] Gateway request failed; using grounded local search:", err);
+    renderCopilotMessage(localCopilotAnswer(query), "bot");
+  });
+}
+
+function localCopilotAnswer(query) {
+  const transcripts = state.transcripts || [];
+  const items = [...(state.actionItems || []), ...(state.demoActionItems || [])];
+  if (!transcripts.length && !items.length) {
+    return "OmniCopilot: No dialogue or action items have been recorded in this meeting yet. Add meeting discussion or notes, then ask again.";
+  }
+
+  const q = query.toLowerCase();
+  if (/action|task|todo|follow.?up/.test(q)) {
+    return items.length
+      ? `OmniCopilot (Local): Recorded action items:\n${items.map((item) => `• ${item.completed ? "Done" : "Open"}: ${item.task} — ${item.assignee || "Team"}`).join("\n")}`
+      : "OmniCopilot (Local): No action items have been recorded in this meeting.";
+  }
+  if (/who|speaker|participant|attendee/.test(q)) {
+    const speakers = [...new Set(transcripts.map((entry) => entry.senderName).filter(Boolean))];
+    return speakers.length
+      ? `OmniCopilot (Local): Speakers in the recorded transcript: ${speakers.join(", ")}.`
+      : "OmniCopilot (Local): No speakers have been recorded yet.";
+  }
+
+  const stopWords = new Set(["what", "when", "where", "which", "about", "were", "with", "from", "they", "this", "that", "have", "does", "tell", "meeting"]);
+  const terms = (q.match(/[\p{L}\p{N}]{3,}/gu) || []).filter((word) => !stopWords.has(word));
+  const ranked = transcripts.map((entry) => {
+    const text = `${entry.originalText || ""} ${entry.translatedText || ""}`.toLowerCase();
+    return { entry, score: terms.reduce((sum, term) => sum + (text.includes(term) ? 1 : 0), 0) };
+  }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score);
+  if (ranked.length) {
+    const matches = ranked.slice(0, 3).map(({ entry }) => `• ${entry.senderName || "Speaker"}: ${entry.translatedText || entry.originalText}`).join("\n");
+    return `OmniCopilot (Local): The closest recorded discussion is:\n${matches}`;
+  }
+  return `OmniCopilot (Local): I couldn't find that in the ${transcripts.length} recorded utterance(s). I only answer from this meeting's transcript and action items.`;
+}
+
+function cancelCopilotRequest(requestId) {
+  const pending = state.copilotPendingRequests[requestId];
+  if (!pending) return;
+  if (typeof pending === "object") {
+    clearTimeout(pending.timer);
+    pending.controller?.abort();
   } else {
-    // Honest offline search when gateway is disconnected
-    setTimeout(() => {
-      if (!state.transcripts || state.transcripts.length === 0) {
-        renderCopilotMessage("OmniCopilot: No dialogue recorded in this room yet. Speak or send a test phrase to start.", "bot");
-        return;
-      }
-      const q = query.toLowerCase();
-      const match = state.transcripts.find((t) =>
-        (t.originalText || "").toLowerCase().includes(q) || (t.translatedText || "").toLowerCase().includes(q)
-      );
-      if (match) {
-        renderCopilotMessage(`OmniCopilot (Local): Found matching utterance from ${match.senderName}: "${match.translatedText || match.originalText}"`, "bot");
-      } else {
-        renderCopilotMessage(`OmniCopilot (Local): Searched ${state.transcripts.length} recorded utterance(s), but could not find information regarding "${query}".`, "bot");
-      }
-    }, 450);
+    clearTimeout(pending);
   }
 }
 
@@ -1795,6 +1886,10 @@ function downloadFile(content, fileName, contentType) {
 // ============================================================
 function runSimulationDemo() {
   if (!startDemoBtn) return;
+  if (state.currentView !== "meeting") {
+    showToast("Join the meeting before starting the demo");
+    return;
+  }
   startDemoBtn.disabled = true;
   startDemoBtn.innerHTML = `<span>Simulating...</span>`;
   showToast("Running demo simulation (clearly labeled sample data)");
@@ -1923,6 +2018,23 @@ function setupWebSpeechRecognition() {
   };
 
   state.speechRecognition = rec;
+}
+
+function syncSpeechRecognitionMode() {
+  if (!state.speechRecognition) return;
+  const shouldRun = state.currentView === "meeting" && !state.isMuted && !state.aiPipelineStatus.asrLoaded;
+  if (shouldRun && !state.isRecognizing) {
+    try {
+      state.speechRecognition.lang = getSpeechLangCode(state.sourceLang);
+      state.speechRecognition.start();
+      state.isRecognizing = true;
+    } catch (err) {
+      // Browsers throw if recognition is already starting; onend will resync it.
+    }
+  } else if (!shouldRun && state.isRecognizing) {
+    try { state.speechRecognition.stop(); } catch (err) {}
+    state.isRecognizing = false;
+  }
 }
 
 // Text to Speech
@@ -2302,10 +2414,19 @@ function setupEventListeners() {
 
   sendInviteBtn?.addEventListener("click", () => {
     const email = inviteEmailInput?.value?.trim();
-    const link = getShareableMeetingLink();
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      showToast("Enter a valid email address");
+      inviteEmailInput?.focus();
+      return;
+    }
+    const link = getMeetingShareUrl();
     const subject = encodeURIComponent(`Invitation to OmniMeet Video Call`);
     const body = encodeURIComponent(`Hi,\n\nPlease join the OmniMeet multilingual video conference using the link below:\n\n${link}\n\nBest,\n${state.userName}`);
-    window.location.href = `mailto:${encodeURIComponent(email || "")}?subject=${subject}&body=${body}`;
+    if (!email) {
+      copyTextToClipboard(link, "Meeting link copied. Share it with your friend!");
+      return;
+    }
+    window.location.href = `mailto:${encodeURIComponent(email)}?subject=${subject}&body=${body}`;
     inviteModal?.classList.add("hidden");
   });
 
@@ -2416,9 +2537,10 @@ async function handleCreateNewMeeting() {
     const res = await fetch("/api/meetings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(10000),
       body: JSON.stringify({
         title: `${state.userName}'s Meeting`,
-        hostName: state.userName
+        createdBy: state.userName
       })
     });
 
@@ -2429,15 +2551,17 @@ async function handleCreateNewMeeting() {
     const data = await res.json();
     const meetingCode = data.code || data.meetingCode;
     const meetingId = data.id || data.meetingId;
+    if (!meetingCode || !meetingId) throw new Error("The gateway returned an incomplete meeting record");
     state.meetingId = meetingId;
     state.meetingCode = meetingCode;
     state.roomId = meetingCode;
+    initRoomBroadcast();
 
     // Update URL without page reload
     window.history.pushState({}, "", `/meet/${meetingCode}`);
 
     // Populate New Meeting share modal
-    const shareUrl = `${window.location.origin}/meet/${meetingCode}`;
+    const shareUrl = getMeetingShareUrl();
     if (newMeetingLinkInput) newMeetingLinkInput.value = shareUrl;
     if (newMeetingCodeSpan) newMeetingCodeSpan.textContent = meetingCode;
 
@@ -2446,11 +2570,7 @@ async function handleCreateNewMeeting() {
     updateMeetingLinkDisplays();
   } catch (err) {
     console.warn("Failed to create meeting:", err);
-    showToast("Failed to create meeting. Falling back to local room.");
-    const fallbackCode = "abc-" + Math.random().toString(36).substring(2, 6) + "-xyz";
-    state.roomId = fallbackCode;
-    state.meetingCode = fallbackCode;
-    switchMainView("lobby");
+    showToast(`Could not create a meeting: ${err.message || "gateway unavailable"}`);
   } finally {
     btnNewMeeting.disabled = false;
     btnNewMeeting.innerHTML = `
@@ -2467,9 +2587,13 @@ async function handleJoinFromCodeInput() {
   btnJoinFromInput.disabled = true;
   btnJoinFromInput.textContent = "Checking...";
 
-  const success = await validateAndOpenRoom(rawInput, true);
-  btnJoinFromInput.disabled = false;
-  btnJoinFromInput.textContent = "Join";
+  let success = false;
+  try {
+    success = await validateAndOpenRoom(rawInput, true);
+  } finally {
+    btnJoinFromInput.disabled = false;
+    btnJoinFromInput.textContent = "Join";
+  }
 
   if (!success) {
     if (homeJoinError) {
@@ -2481,22 +2605,28 @@ async function handleJoinFromCodeInput() {
 
 async function validateAndOpenRoom(codeOrUrl, updateHistory = true) {
   try {
-    // Extract code from potential URL or raw code
-    const cleaned = codeOrUrl.replace(/https?:\/\/[^/]+\/meet\//i, "")
-      .replace(/https?:\/\/[^/]+\/?\?room=/i, "")
-      .replace(/https?:\/\/[^/]+\/?\?code=/i, "")
-      .replace(/[^a-zA-Z0-9_\-]/g, "")
-      .toLowerCase();
+    const raw = String(codeOrUrl || "").trim();
+    let candidate = raw;
+    try {
+      const parsed = new URL(raw, window.location.origin);
+      const pathCode = parsed.pathname.match(/\/meet\/([a-zA-Z0-9_-]+)/i)?.[1];
+      candidate = pathCode || parsed.searchParams.get("room") || parsed.searchParams.get("code") || raw;
+    } catch (err) {}
+    const cleaned = candidate.replace(/[^a-zA-Z0-9_-]/g, "").toLowerCase();
 
     if (!cleaned) return false;
 
     // Validate with backend
-    const res = await fetch(`/api/meetings/${encodeURIComponent(cleaned)}`);
+    const res = await fetch(`/api/meetings/${encodeURIComponent(cleaned)}`, {
+      signal: AbortSignal.timeout(8000)
+    });
     if (res.ok) {
       const data = await res.json();
+      if (data.isActive === false) return false;
       state.meetingId = data.id || data.meetingId;
       state.meetingCode = data.code || data.meetingCode || cleaned;
       state.roomId = data.code || data.meetingCode || cleaned;
+      initRoomBroadcast();
 
       if (updateHistory) {
         window.history.pushState({}, "", `/meet/${state.roomId}`);
@@ -2509,11 +2639,66 @@ async function validateAndOpenRoom(codeOrUrl, updateHistory = true) {
       return false;
     }
   } catch (err) {
-    console.warn("Validation request error, opening room directly:", err);
-    state.roomId = codeOrUrl.toLowerCase().replace(/[^a-z0-9_\-]/g, "");
-    state.meetingCode = state.roomId;
-    switchMainView("lobby");
-    return true;
+    console.warn("Meeting validation failed:", err);
+    showToast("Could not validate the meeting. Check that OmniMeet is running and try again.");
+    return false;
+  }
+}
+
+function getMeetingShareUrl() {
+  const code = state.meetingCode || state.roomId;
+  const baseUrl = state.publicAppUrl || window.location.origin;
+  return `${baseUrl}/meet/${encodeURIComponent(code)}`;
+}
+
+async function loadPublicAppConfig() {
+  try {
+    const response = await fetch("/api/config", { cache: "no-store" });
+    if (!response.ok) return;
+    const config = await response.json();
+    state.publicAppUrl = (config.publicAppUrl || "").replace(/\/$/, "");
+    updateMeetingLinkDisplays();
+  } catch (err) {
+    // Sharing still works for devices that can reach this host directly.
+  }
+}
+
+function updateMeetingLinkDisplays() {
+  const code = state.meetingCode || state.roomId;
+  const shareUrl = getMeetingShareUrl();
+  if (lobbyRoomName) lobbyRoomName.textContent = code;
+  if (lobbyRoomLinkInput) lobbyRoomLinkInput.value = shareUrl;
+  if (meetingShareLink) meetingShareLink.value = shareUrl;
+  if (newMeetingLinkInput) newMeetingLinkInput.value = shareUrl;
+  if (newMeetingCodeSpan) newMeetingCodeSpan.textContent = code;
+  if (headerRoomLabel) headerRoomLabel.textContent = code;
+  if (dockMeetingCodeDisplay) dockMeetingCodeDisplay.textContent = code;
+  const inviteHint = inviteModal?.querySelector(".modal-helper-text");
+  if (inviteHint) {
+    inviteHint.textContent = !state.publicAppUrl && ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname)
+      ? "This is a local development link. Friends on other devices cannot open it until the app is deployed or exposed through a secure tunnel."
+      : "Share this link with your guests. They can open it to join the meeting.";
+  }
+}
+
+function copyMeetingLink() {
+  copyTextToClipboard(getMeetingShareUrl(), "Meeting link copied! 📋");
+}
+
+async function handleJoinCustomRoom() {
+  const code = lobbyRoomIdInput?.value?.trim();
+  if (!code) {
+    showToast("Enter a meeting code first");
+    lobbyRoomIdInput?.focus();
+    return;
+  }
+
+  if (lobbyJoinByIdBtn) lobbyJoinByIdBtn.disabled = true;
+  try {
+    const joined = await validateAndOpenRoom(code, true);
+    if (!joined) showToast("That meeting code was not found. Check it and try again.");
+  } finally {
+    if (lobbyJoinByIdBtn) lobbyJoinByIdBtn.disabled = false;
   }
 }
 
@@ -2650,6 +2835,124 @@ async function switchCameraDevice(deviceId) {
 // ============================================================
 //  JOINING & LEAVING THE ACTIVE MEETING
 
+async function handleJoinMeeting(startWithScreen = false) {
+  if (state.isJoining) return;
+  state.isJoining = true;
+  if (joinMeetingBtn) joinMeetingBtn.disabled = true;
+  if (joinWithScreenBtn) joinWithScreenBtn.disabled = true;
+
+  try {
+    state.userName = lobbyDisplayNameInput?.value?.trim() || homeUserNameInput?.value?.trim() || state.userName || "Guest";
+    state.sourceLang = lobbySpokenLang?.value || homeUserLangSelect?.value || state.sourceLang;
+    state.targetLang = lobbyTranslateInto?.value || state.targetLang;
+    updateUserAvatar();
+    if (meetingTitle) meetingTitle.textContent = state.meetingCode || state.roomId;
+    if (headerRoomLabel) headerRoomLabel.textContent = state.meetingCode || state.roomId;
+    if (dockMeetingCodeDisplay) dockMeetingCodeDisplay.textContent = state.meetingCode || state.roomId;
+
+    stopLobbyPreview();
+    if (state.isMuted) {
+      stopAudioCapture();
+    } else {
+      await startAudioCapture();
+    }
+
+    if (state.cameraStream?.active && localVideo) {
+      localVideo.srcObject = state.cameraStream;
+      localVideo.classList.remove("hidden");
+      avatarFallbackLocal?.classList.add("hidden");
+    }
+
+    state.meetingSeconds = 0;
+    updateMeetingClock();
+    if (state.timerInterval) clearInterval(state.timerInterval);
+    state.timerInterval = setInterval(updateMeetingClock, 1000);
+    switchMainView("meeting");
+    connectWebSocket();
+    syncSpeechRecognitionMode();
+
+    if (startWithScreen) {
+      // Let the meeting screen and socket initialize before requesting screen capture.
+      setTimeout(() => toggleScreenShare(), 300);
+    }
+    showToast("Joining meeting...");
+  } catch (err) {
+    console.error("[Meeting] Could not join:", err);
+    showToast(`Could not join the meeting: ${err.message || err}`);
+  } finally {
+    state.isJoining = false;
+    if (joinMeetingBtn) joinMeetingBtn.disabled = false;
+    if (joinWithScreenBtn) joinWithScreenBtn.disabled = false;
+  }
+}
+
+function updateMeetingClock() {
+  state.meetingSeconds += 1;
+  const minutes = Math.floor(state.meetingSeconds / 60);
+  const seconds = state.meetingSeconds % 60;
+  const display = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  if (meetingTimer) meetingTimer.textContent = display;
+  if (metaDuration) metaDuration.textContent = display;
+}
+
+function handleLeaveCall() {
+  if (state.wsReconnectTimer) {
+    clearTimeout(state.wsReconnectTimer);
+    state.wsReconnectTimer = null;
+  }
+  state.wsReconnectAttempts = 0;
+  state.wsHasConnected = false;
+
+  if (state.timerInterval) {
+    clearInterval(state.timerInterval);
+    state.timerInterval = null;
+  }
+  if (state.summaryRefreshInterval) {
+    clearInterval(state.summaryRefreshInterval);
+    state.summaryRefreshInterval = null;
+  }
+
+  Object.keys(state.copilotPendingRequests).forEach(cancelCopilotRequest);
+  state.copilotPendingRequests = {};
+
+  try { state.speechRecognition?.stop(); } catch (err) {}
+  state.isRecognizing = false;
+  state.isMuted = true;
+  stopAudioCapture();
+
+  [state.cameraStream, state.screenStream].forEach((stream) => {
+    stream?.getTracks().forEach((track) => track.stop());
+  });
+  state.cameraStream = null;
+  state.screenStream = null;
+  state.isCameraOn = false;
+  state.isScreenSharing = false;
+
+  cleanupAllPeerConnections();
+  try { state.livekitRoom?.disconnect(); } catch (err) {}
+  state.livekitRoom = null;
+
+  if (state.broadcastChannel) {
+    try { state.broadcastChannel.postMessage({ type: "peer_left", senderId: state.userId }); } catch (err) {}
+  }
+  state.isConnected = false;
+  if (state.ws) {
+    try { state.ws.close(); } catch (err) {}
+    state.ws = null;
+  }
+
+  state.peers = {};
+  renderRemotePeers();
+  updateParticipantCount();
+  if (localVideo) {
+    localVideo.srcObject = null;
+    localVideo.classList.add("hidden");
+  }
+  if (avatarFallbackLocal) avatarFallbackLocal.classList.remove("hidden");
+  switchMainView("post-meeting");
+  if (postMeetingSubtitle) postMeetingSubtitle.textContent = `You left meeting ${state.meetingCode || state.roomId}. Your meeting records are available below.`;
+}
+
 function updateSpeechTestUserLabel() {
   if (speechActiveUserLabel) {
     const src = getLanguageName(state.sourceLang);
@@ -2764,6 +3067,21 @@ async function translateText(text, srcLang, tgtLang) {
   if (!text || srcLang === tgtLang) return text;
 
   try {
+    const gatewayResponse = await fetch("/api/translate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, sourceLanguage: srcLang, targetLanguage: tgtLang }),
+      signal: AbortSignal.timeout(5000)
+    });
+    if (gatewayResponse.ok) {
+      const result = await gatewayResponse.json();
+      if (result.translated && result.translatedText) return result.translatedText;
+    }
+  } catch (err) {
+    // Try the browser fallback when the gateway translation provider is unavailable.
+  }
+
+  try {
     const sl = srcLang === "auto" ? "auto" : srcLang;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 2600);
@@ -2784,7 +3102,7 @@ async function translateText(text, srcLang, tgtLang) {
     // Offline or network error
   }
 
-  return `[${tgtLang.toUpperCase()}] ${text}`;
+  return text;
 }
 
 function resampleTo16k(audioBuffer, originalSampleRate) {
@@ -2887,47 +3205,96 @@ function appendChatMessageToUI(msg) {
 //  LIVEKIT SFU MEDIA TRANSPORT (WITH WEBRTC MESH FALLBACK)
 // ============================================================
 
+let livekitClientLoadPromise = null;
+
+function loadLivekitClient() {
+  if (typeof LivekitClient !== "undefined") return Promise.resolve(LivekitClient);
+  if (!livekitClientLoadPromise) {
+    livekitClientLoadPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js";
+      script.async = true;
+      script.onload = () => {
+        if (typeof LivekitClient !== "undefined") resolve(LivekitClient);
+        else reject(new Error("LiveKit client loaded without exposing its browser API."));
+      };
+      script.onerror = () => reject(new Error("Could not load the LiveKit client from the CDN."));
+      document.head.appendChild(script);
+    });
+  }
+  return livekitClientLoadPromise;
+}
+
 async function handleMediaTransportConfig(mediaConfig) {
   const modePill = document.getElementById("meetingTransportPill");
   const dMode = document.getElementById("detailsTransportMode");
-  if (mediaConfig.iceServers?.length) state.rtcConfig.iceServers = mediaConfig.iceServers;
 
-  const livekitUrl = mediaConfig.livekitUrl || mediaConfig.serverUrl;
-  if (mediaConfig.mode === "sfu" && mediaConfig.token && livekitUrl && typeof LivekitClient !== "undefined") {
+  if (mediaConfig.iceServers && mediaConfig.iceServers.length > 0) {
+    state.rtcConfig.iceServers = mediaConfig.iceServers;
+  }
+
+  if (mediaConfig.mode === "sfu" && mediaConfig.token) {
     state.mediaTransportMode = "sfu";
     if (modePill) modePill.textContent = "LIVEKIT SFU";
+    const livekitUrl = mediaConfig.livekitUrl || mediaConfig.serverUrl;
+    if (!livekitUrl) {
+      console.warn("[Media] SFU credentials were returned without a LiveKit server URL; using mesh fallback.");
+      state.mediaTransportMode = "mesh";
+      if (modePill) modePill.textContent = "P2P MESH";
+      if (dMode) dMode.textContent = "WebRTC P2P Mesh (STUN/TURN)";
+      return;
+    }
     if (dMode) dMode.textContent = `LiveKit SFU (${livekitUrl})`;
+    console.log("[Media] Connecting via LiveKit SFU:", livekitUrl);
+
     try {
-      const room = new LivekitClient.Room({ adaptiveStream: true, dynacast: true });
+      const LivekitClient = await loadLivekitClient();
+      const room = new LivekitClient.Room({
+        adaptiveStream: true,
+        dynacast: true
+      });
       state.livekitRoom = room;
       state.livekitConnected = false;
       room.on(LivekitClient.RoomEvent.Disconnected, () => {
         state.livekitConnected = false;
         state.livekitPublishedTracks = {};
       });
+
       room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
-        if (track.kind !== "video" && track.kind !== "audio") return;
-        const remoteStream = track.mediaStream || new MediaStream([track.mediaStreamTrack]);
-        const peerId = participant.identity;
-        state.remoteMediaStreams[peerId] = remoteStream;
-        const videoEl = document.getElementById(`video-peer-${peerId}`);
-        if (videoEl) {
-          videoEl.srcObject = remoteStream;
-          videoEl.classList.remove("hidden");
-          document.getElementById(`avatar-fallback-${peerId}`)?.classList.add("hidden");
+        if (track.kind === "video" || track.kind === "audio") {
+          const remoteStream = track.mediaStream || new MediaStream([track.mediaStreamTrack]);
+          const peerId = participant.identity;
+          state.remoteMediaStreams[peerId] = remoteStream;
+
+          const videoEl = document.getElementById(`video-peer-${peerId}`);
+          if (videoEl) {
+            videoEl.srcObject = remoteStream;
+            videoEl.classList.remove("hidden");
+            const fallback = document.getElementById(`avatar-fallback-${peerId}`);
+            if (fallback) fallback.classList.add("hidden");
+          }
         }
       });
+
       await room.connect(livekitUrl, mediaConfig.token);
       state.livekitConnected = true;
       console.log("[Media] Connected to LiveKit SFU room successfully");
-      if (state.cameraStream && state.isCameraOn)
-        await syncLiveKitLocalTrack("video", state.cameraStream.getVideoTracks()[0] || null);
-      if (state.mediaStream && !state.isMuted)
-        await syncLiveKitLocalTrack("audio", state.mediaStream.getAudioTracks()[0] || null);
+
+      // Publish local camera track if active
+      if (state.cameraStream && state.isCameraOn) {
+        const videoTrack = state.cameraStream.getVideoTracks()[0];
+        if (videoTrack) await syncLiveKitLocalTrack("video", videoTrack);
+      }
+      // Publish mic if active
+      if (state.mediaStream && !state.isMuted) {
+        const audioTrack = state.mediaStream.getAudioTracks()[0];
+        if (audioTrack) await syncLiveKitLocalTrack("audio", audioTrack);
+      }
     } catch (err) {
-      console.warn("[Media] LiveKit connection failed, falling back to P2P mesh:", err);
+      console.warn("[Media] LiveKit connection failed, fallback to P2P mesh:", err);
       state.mediaTransportMode = "mesh";
       state.livekitConnected = false;
+      state.livekitPublishedTracks = {};
       if (modePill) modePill.textContent = "P2P MESH";
       if (dMode) dMode.textContent = "WebRTC P2P Mesh (STUN/TURN)";
     }
@@ -3080,3 +3447,4 @@ window.addEventListener("beforeunload", () => {
 
 // Start Application on Load
 window.addEventListener("DOMContentLoaded", init);
+
