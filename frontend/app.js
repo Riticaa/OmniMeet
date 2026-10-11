@@ -1422,6 +1422,12 @@ function renderConversationItem(data) {
     `.conversation-item[data-timestamp="${data.timestamp}"][data-sender-id="${data.senderId}"]`
   );
   if (existingDomItem) {
+    const transcriptList = data.isDemo ? state.demoTranscripts : state.transcripts;
+    const transcriptRecord = transcriptList.find(
+      (item) => item.timestamp === data.timestamp && item.senderId === data.senderId
+    );
+    if (transcriptRecord) Object.assign(transcriptRecord, data);
+
     const transEl = existingDomItem.querySelector(".item-translated-text");
     if (transEl) {
       const displayTranslation = data.translationPending
