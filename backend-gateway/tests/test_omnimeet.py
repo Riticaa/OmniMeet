@@ -16,6 +16,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 import database
 import meeting_utils
 import livekit_service
+import main
 from copilot_engine import OmniCopilotEngine
 from main import app
 from fastapi.testclient import TestClient
@@ -231,6 +232,21 @@ def test_frontend_routes_serve_the_complete_meeting_client():
     assert "function handleJoinMeeting(" in scripts.text
     assert "function handleLeaveCall(" in scripts.text
     assert "function submitCopilotQuestion(" in scripts.text
+    assert "async function translateTextDetailed(" in scripts.text
+    assert "Translation unavailable" in scripts.text
+    assert "rec.onend = () =>" in scripts.text
+
+
+def test_translation_endpoint_reports_unavailable_provider(monkeypatch):
+    """A missing translation provider must be reported instead of faking a translation."""
+    monkeypatch.setattr(main, "translation_engine", None)
+    res = client.post("/api/translate", json={
+        "text": "Bonjour tout le monde",
+        "sourceLanguage": "fr",
+        "targetLanguage": "en",
+    })
+    assert res.status_code == 200
+    assert res.json() == {"translatedText": "Bonjour tout le monde", "translated": False}
 
 
 def test_webrtc_config_endpoint():
