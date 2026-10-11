@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: omnimeet
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerfilePath: ./backend-gateway/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    disk:
+      name: omnimeet-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: SQLITE_DB_PATH
+        value: /app/data/omnimeet.db
+      - key: MEDIA_TRANSPORT_MODE
+        value: sfu
+      - key: ENABLE_LOCAL_ASR
+        value: "false"
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+

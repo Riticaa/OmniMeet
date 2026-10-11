@@ -535,8 +535,8 @@ function handleRoomState(data) {
         isScreenSharing: p.isScreenSharing
       });
 
-      // Initiate WebRTC connection to this peer
-      initiatePeerConnection(p.userId);
+      // Initiate P2P only when the SFU is not active.
+      if (state.mediaTransportMode !== "sfu") initiatePeerConnection(p.userId);
     }
   });
 
@@ -551,8 +551,8 @@ function handleRoomEvent(data) {
       lang: data.preferredLanguage,
       targetLang: data.targetLanguage
     });
-    // The newly joined user will initiate the offer, or we can initiate
-    initiatePeerConnection(data.userId);
+    // Use the SFU exclusively while it is active.
+    if (state.mediaTransportMode !== "sfu") initiatePeerConnection(data.userId);
     showToast(`${data.userName || "A participant"} joined the room`);
   } else if (data.event === "user_left" && data.userId !== state.userId) {
     removeRemotePeer(data.userId);
@@ -930,6 +930,7 @@ async function toggleMicrophone() {
     }
     showToast("Microphone unmuted");
     await startAudioCapture();
+    await syncLiveKitLocalTrack("audio", state.mediaStream?.getAudioTracks()[0] || null);
 
     if (state.speechRecognition && !state.isRecognizing) {
       try {
@@ -945,6 +946,7 @@ async function toggleMicrophone() {
       localMicIcon.classList.add("muted");
     }
     showToast("Microphone muted");
+    await syncLiveKitLocalTrack("audio", null);
     stopAudioCapture();
 
     if (state.speechRecognition && state.isRecognizing) {
@@ -1027,6 +1029,7 @@ async function toggleCamera() {
   if (state.isCameraOn) {
     // Turn camera off
     state.isCameraOn = false;
+    await syncLiveKitLocalTrack("video", null);
     if (state.cameraStream) {
       state.cameraStream.getVideoTracks().forEach((t) => t.stop());
       state.cameraStream = null;
@@ -1070,6 +1073,7 @@ async function toggleCamera() {
       toggleCameraBtn?.classList.add("active-blue");
 
       const videoTrack = stream.getVideoTracks()[0];
+      await syncLiveKitLocalTrack("video", videoTrack);
       Object.values(state.peerConnections).forEach((pc) => {
         const videoSender = pc.getSenders().find((s) => s.track && s.track.kind === "video");
         if (videoSender) {
@@ -1108,6 +1112,7 @@ async function toggleScreenShare() {
       if (avatarFallbackLocal) avatarFallbackLocal.classList.add("hidden");
 
       const screenTrack = stream.getVideoTracks()[0];
+      await syncLiveKitLocalTrack("video", screenTrack);
 
       // Replace track on all active peer connections
       Object.values(state.peerConnections).forEach((pc) => {
@@ -1144,12 +1149,14 @@ function stopScreenSharing() {
   // Restore camera track if camera was enabled
   if (state.isCameraOn && state.cameraStream) {
     const camTrack = state.cameraStream.getVideoTracks()[0];
+    syncLiveKitLocalTrack("video", camTrack);
     if (localVideo) localVideo.srcObject = state.cameraStream;
     Object.values(state.peerConnections).forEach((pc) => {
       const sender = pc.getSenders().find((s) => s.track && s.track.kind === "video");
       if (sender) sender.replaceTrack(camTrack);
     });
   } else {
+    syncLiveKitLocalTrack("video", null);
     if (localVideo) {
       localVideo.srcObject = null;
       localVideo.classList.add("hidden");
@@ -1162,6 +1169,27 @@ function stopScreenSharing() {
       const sender = pc.getSenders().find((s) => s.track && s.track.kind === "video");
       if (sender) sender.replaceTrack(null);
     });
+  }
+}
+
+async function syncLiveKitLocalTrack(kind, track) {
+  const room = state.livekitRoom;
+  if (!room?.localParticipant || !state.livekitConnected) return;
+  const published = state.livekitPublishedTracks || (state.livekitPublishedTracks = {});
+  const previous = published[kind];
+  if (previous === track) return;
+  try {
+    if (previous) {
+      await room.localParticipant.unpublishTrack(previous);
+      delete published[kind];
+    }
+    if (track && track.readyState === "live") {
+      await room.localParticipant.publishTrack(track);
+      published[kind] = track;
+    }
+  } catch (err) {
+    console.warn(`[Media] Could not update LiveKit ${kind} track:`, err);
+    showToast(`Could not update ${kind === "audio" ? "microphone" : "camera/share"} on the meeting server`);
   }
 }
 
@@ -2806,56 +2834,44 @@ function appendChatMessageToUI(msg) {
 async function handleMediaTransportConfig(mediaConfig) {
   const modePill = document.getElementById("meetingTransportPill");
   const dMode = document.getElementById("detailsTransportMode");
+  if (mediaConfig.iceServers?.length) state.rtcConfig.iceServers = mediaConfig.iceServers;
 
-  if (mediaConfig.iceServers && mediaConfig.iceServers.length > 0) {
-    state.rtcConfig.iceServers = mediaConfig.iceServers;
-  }
-
-  if (mediaConfig.mode === "sfu" && mediaConfig.token && typeof LivekitClient !== "undefined") {
+  const livekitUrl = mediaConfig.livekitUrl || mediaConfig.serverUrl;
+  if (mediaConfig.mode === "sfu" && mediaConfig.token && livekitUrl && typeof LivekitClient !== "undefined") {
     state.mediaTransportMode = "sfu";
     if (modePill) modePill.textContent = "LIVEKIT SFU";
-    if (dMode) dMode.textContent = `LiveKit SFU (${mediaConfig.serverUrl || "Active"})`;
-    console.log("[Media] Connecting via LiveKit SFU:", mediaConfig.serverUrl);
-
+    if (dMode) dMode.textContent = `LiveKit SFU (${livekitUrl})`;
     try {
-      const room = new LivekitClient.Room({
-        adaptiveStream: true,
-        dynacast: true
-      });
+      const room = new LivekitClient.Room({ adaptiveStream: true, dynacast: true });
       state.livekitRoom = room;
-
+      state.livekitConnected = false;
+      room.on(LivekitClient.RoomEvent.Disconnected, () => {
+        state.livekitConnected = false;
+        state.livekitPublishedTracks = {};
+      });
       room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
-        if (track.kind === "video" || track.kind === "audio") {
-          const remoteStream = track.mediaStream || new MediaStream([track.mediaStreamTrack]);
-          const peerId = participant.identity;
-          state.remoteMediaStreams[peerId] = remoteStream;
-
-          const videoEl = document.getElementById(`video-peer-${peerId}`);
-          if (videoEl) {
-            videoEl.srcObject = remoteStream;
-            videoEl.classList.remove("hidden");
-            const fallback = document.getElementById(`avatar-fallback-${peerId}`);
-            if (fallback) fallback.classList.add("hidden");
-          }
+        if (track.kind !== "video" && track.kind !== "audio") return;
+        const remoteStream = track.mediaStream || new MediaStream([track.mediaStreamTrack]);
+        const peerId = participant.identity;
+        state.remoteMediaStreams[peerId] = remoteStream;
+        const videoEl = document.getElementById(`video-peer-${peerId}`);
+        if (videoEl) {
+          videoEl.srcObject = remoteStream;
+          videoEl.classList.remove("hidden");
+          document.getElementById(`avatar-fallback-${peerId}`)?.classList.add("hidden");
         }
       });
-
-      await room.connect(mediaConfig.serverUrl, mediaConfig.token);
+      await room.connect(livekitUrl, mediaConfig.token);
+      state.livekitConnected = true;
       console.log("[Media] Connected to LiveKit SFU room successfully");
-
-      // Publish local camera track if active
-      if (state.cameraStream && state.isCameraOn) {
-        const videoTrack = state.cameraStream.getVideoTracks()[0];
-        if (videoTrack) await room.localParticipant.publishTrack(videoTrack);
-      }
-      // Publish mic if active
-      if (state.mediaStream && !state.isMuted) {
-        const audioTrack = state.mediaStream.getAudioTracks()[0];
-        if (audioTrack) await room.localParticipant.publishTrack(audioTrack);
-      }
+      if (state.cameraStream && state.isCameraOn)
+        await syncLiveKitLocalTrack("video", state.cameraStream.getVideoTracks()[0] || null);
+      if (state.mediaStream && !state.isMuted)
+        await syncLiveKitLocalTrack("audio", state.mediaStream.getAudioTracks()[0] || null);
     } catch (err) {
-      console.warn("[Media] LiveKit connection failed, fallback to P2P mesh:", err);
+      console.warn("[Media] LiveKit connection failed, falling back to P2P mesh:", err);
       state.mediaTransportMode = "mesh";
+      state.livekitConnected = false;
       if (modePill) modePill.textContent = "P2P MESH";
       if (dMode) dMode.textContent = "WebRTC P2P Mesh (STUN/TURN)";
     }

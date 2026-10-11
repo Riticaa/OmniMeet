@@ -319,6 +319,13 @@ class CopilotAskRequest(BaseModel):
     query: str
 
 
+@app.get("/api/config")
+async def public_app_config():
+    """Expose the canonical public origin used to create shareable meeting URLs."""
+    public_url = os.getenv("PUBLIC_APP_URL", "").strip() or os.getenv("RENDER_EXTERNAL_URL", "").strip()
+    return {"publicAppUrl": public_url.rstrip("/")}
+
+
 @app.get("/health")
 @app.get("/api/health")
 async def health_check():

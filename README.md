@@ -1,162 +1,132 @@
-# OmniMeet AI — Multilingual Video Meetings & Meeting Intelligence
+# OmniMeet
 
-> **Real-time multilingual video conferencing web application inspired by Google Meet's core flow, featuring unique shareable meeting codes, pre-join audio/video preview, LiveKit SFU & WebRTC P2P mesh media transport, live cross-language subtitles, persistent room-scoped chat, action items, and grounded AI meeting copilot.**
+OmniMeet is a browser-based meeting application with shareable meeting codes, real-time audio/video, room chat, captions and translation, collaborative action items, meeting records, and an AI copilot.
 
----
+This guide covers the current architecture, local setup, environment configuration, and deployment to Render. The web app and signaling API run together as one FastAPI service. For reliable calls between people on different networks, use a public LiveKit server such as LiveKit Cloud; the local Docker Compose LiveKit server is for development.
 
-## 📌 Architecture & Design Choices
+## Contents
 
-OmniMeet provides real-time cross-language communication and grounded meeting intelligence without fabricating room data or misleading users with fake cloud integrations.
+- [Features](#features)
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Run locally](#run-locally)
+- [Configuration](#configuration)
+- [Deploy to Render](#deploy-to-render)
+- [Limitations and production notes](#limitations-and-production-notes)
+- [Troubleshooting](#troubleshooting)
 
-```
-                  ┌──────────────────────────────────────────────┐
-                  │           Browser A (Alex Morgan)            │
-                  │  - Camera Preview & Audio Level Meter        │
-                  │  - Live Subtitles (EN Spoken -> ES Subtitles)│
-                  │  - In-Meeting Chat & Action Items Drawer     │
-                  └──────────────┬───────────────────────────────┘
-                                 │
-           ┌─────────────────────┴─────────────────────┐
-           ▼                                           ▼
-┌─────────────────────────────────┐   ┌─────────────────────────────────┐
-│     FastAPI Gateway (Port 8000) │   │     LiveKit SFU / P2P Mesh      │
-│  - SQLite WAL Database          │   │  - Selective Forwarding Unit    │
-│  - REST & WebSocket Signaling   │   │  - Audio & Video Media Tracks   │
-│  - Dynamic Subtitle Router      │   │  - Screen Sharing Streaming     │
-│  - Gemini 3.5 Flash Copilot     │   │  - STUN / TURN NAT Traversal    │
-└────────────────┬────────────────┘   └────────────────┬────────────────┘
-                 │                                     │
-           ┌─────┴─────────────────────────────────────┘
-           ▼
-┌──────────────────────────────────────────────┐
-│           Browser B (Sofia Martinez)         │
-│  - Remote Video Tile & Active Speaker Wave   │
-│  - Live Subtitles (ES Spoken -> EN Subtitles)│
-│  - Persistent Meeting Records Review         │
-└──────────────────────────────────────────────┘
-```
+## Features
 
-### Core Architecture Components
-1. **Meeting Creation & URL Routing:**
-   - Every new meeting generates a cryptographically random meeting ID (`mtg-xxxx-yyyy`) and a human-friendly Google Meet–style code (`xxx-yyyy-zzz`).
-   - Shareable URLs (`/meet/{code}` or `?room={code}`) allow one-click joining.
-   - Code validation endpoint (`GET /api/meetings/{id_or_code}`) verifies active rooms and maps friendly codes to persistent meeting records.
-2. **Pre-Join Screen ("Green Room"):**
-   - Live camera preview and microphone test.
-   - Real-time audio signal visualizer meter driven by Web Audio `AnalyserNode`.
-   - Audio output test chime 🔔 to verify speakers before entering.
-   - Device selector for cameras and microphones.
-   - Spoken language and subtitle translation target selection.
-3. **Multi-User Real-Time Audio & Video:**
-   - **SFU Transport Mode:** Integrates LiveKit SFU client SDK with server-side JWT authentication (`/api/meetings/{id}/token`).
-   - **WebRTC P2P Mesh Fallback:** Standard browser `RTCPeerConnection` mesh with Google public STUN (`stun:stun.l.google.com:19302`) and optional TURN credentials.
-   - Live camera toggle, mic mute, screen sharing with automatic camera track restoration, and active speaker detection.
-4. **Multilingual Subtitles & Translation:**
-   - Speech pipeline with Faster-Whisper (INT8 quantized) or browser Web Speech API.
-   - Real-time cross-language translation routed individually to each participant's target language.
-   - Bilingual display toggle (original + translated).
-5. **In-Meeting Chat & Collaborative Tasks:**
-   - Room-scoped persistent chat saved directly to SQLite.
-   - Synchronized action items with task description, assignee, priority, and real-time completion state.
-6. **Grounded AI Copilot & Meeting Minutes:**
-   - OmniCopilot powered by Google Gemini (`gemini-3.5-flash`), strictly grounded in the meeting's real recorded dialogue. If evidence is lacking, it explicitly states so.
-   - Export Minutes of Meeting (.md) with genuine attendee lists, action items, and dialogue.
-7. **Persistence & Lifecycle:**
-   - SQLite database (`omnimeet.db`) in WAL mode survives gateway restarts.
-   - Full post-meeting archive review (`GET /api/meetings/{id}/records`).
+- Create a meeting with a unique ID and human-friendly code, then share its URL.
+- Join a meeting with a code or link and preview camera and microphone before joining.
+- Use LiveKit SFU media or the WebRTC mesh fallback.
+- Use in-meeting chat and room-scoped action items.
+- View meeting records, including saved chat, transcripts, and action items.
+- Use browser speech recognition or the optional local speech pipeline for captions; translation and the Gemini-powered copilot depend on the configured services and keys.
 
----
+Feature availability depends on browser support, device permissions, network connectivity, and optional service credentials. A local installation is not publicly reachable by invitees unless it is exposed through a hosting provider or secure tunnel.
 
-## 🛠️ Configuration & Environment Variables
+## Architecture
 
-Copy `.env.example` to create your local `.env`:
+| Component | Purpose |
+| --- | --- |
+| Frontend | HTML, CSS, and JavaScript served by the gateway |
+| Gateway | FastAPI REST and WebSocket endpoints for meetings, signaling, chat, and records |
+| Database | SQLite storage for meeting records, chat, transcripts, and action items |
+| Media | LiveKit SFU for cloud calls; WebRTC mesh fallback for small/local sessions |
+| Optional AI | Gemini API for copilot features; local Faster-Whisper pipeline can be enabled for speech recognition |
+
+## Requirements
+
+### For local development
+
+- Python 3.11 or newer
+- pip and a modern browser (Chrome, Edge, or Firefox recommended)
+- A microphone and camera for audio/video features
+- Docker Desktop only if using the Docker Compose setup
+
+### For hosted meetings
+
+- A GitHub repository connected to Render
+- A LiveKit Cloud project (or another publicly reachable LiveKit deployment) with its WebSocket URL, API key, and API secret
+- Optional: a Gemini API key for hosted copilot responses
+- A Render paid web-service plan for the persistent disk configured in the Blueprint
+
+## Run locally
+
+### Python setup
+
+From the repository root, create an environment and install gateway requirements:
+
 ```bash
-cp .env.example backend-gateway/.env
+python -m venv .venv
+# Windows PowerShell
+.venv\Scripts\python -m pip install -r backend-gateway/requirements.txt
+# macOS/Linux: .venv/bin/python -m pip install -r backend-gateway/requirements.txt
 ```
 
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| `PORT` | Gateway HTTP & WebSocket port | `8000` |
-| `HOST` | Bind host address | `0.0.0.0` |
-| `SQLITE_DB_PATH` | Path to persistent SQLite database | `omnimeet.db` |
-| `GEMINI_API_KEY` | Google Gemini API key for meeting summaries & Copilot | *Optional (Falls back to local search)* |
+Start the gateway:
+
+```bash
+# Windows PowerShell
+.venv\Scripts\python -m uvicorn main:app --app-dir backend-gateway --host 127.0.0.1 --port 8000
+# macOS/Linux: .venv/bin/python -m uvicorn main:app --app-dir backend-gateway --host 127.0.0.1 --port 8000
+```
+
+Open [http://localhost:8000](http://localhost:8000). Do not open `frontend/index.html` as a file; meeting features require the gateway. On Windows, `run_omnimeet.bat` can start the local service.
+
+### Docker Compose with local LiveKit
+
+```bash
+docker compose up --build
+```
+
+The gateway is available at `http://localhost:8000`; the local LiveKit service is available to the local development stack. The local LiveKit address is not usable by people outside your machine or Docker network.
+
+## Configuration
+
+Set environment variables in a local `.env` file (copy `.env.example` as a starting point). Never commit real secrets.
+
+| Variable | Purpose | Local default / note |
+| --- | --- | --- |
+| `PORT` | HTTP and WebSocket listening port | `8000`; Render provides its own port |
+| `HOST` | Address the gateway binds to | `0.0.0.0` |
+| `SQLITE_DB_PATH` | SQLite database file path | Project database by default; Render uses `/app/data/omnimeet.db` |
+| `PUBLIC_APP_URL` | Public origin used in meeting invite links | Optional; Render falls back to its service URL |
+| `MEDIA_TRANSPORT_MODE` | Select media transport | `mesh` locally; `sfu` on Render |
+| `LIVEKIT_URL` | LiveKit signaling WebSocket URL | Local Docker URL for local stack; public `wss://` URL when hosted |
+| `LIVEKIT_API_KEY` | LiveKit API key used to issue room tokens | Keep secret outside source control |
+| `LIVEKIT_API_SECRET` | LiveKit signing secret | Keep secret outside source control |
+| `GEMINI_API_KEY` | Optional Gemini copilot key | Omit to use the available fallback behavior |
 | `GEMINI_MODEL` | Gemini model name | `gemini-3.5-flash` |
-| `MEDIA_TRANSPORT_MODE` | Media transport mode: `sfu` or `mesh` | `mesh` |
-| `LIVEKIT_URL` | LiveKit SFU server WebSocket URL | `ws://localhost:7880` |
-| `LIVEKIT_API_KEY` | LiveKit API Key for JWT tokens | `devkey` |
-| `LIVEKIT_API_SECRET` | LiveKit API Secret for JWT tokens | `secret` |
-| `STUN_SERVER_1` | Primary STUN server | `stun:stun.l.google.com:19302` |
-| `STUN_SERVER_2` | Secondary STUN server | `stun:stun1.l.google.com:19302` |
-| `TURN_SERVER_URL` | Optional TURN server URL (RFC 5766) | *None* |
-| `TURN_USERNAME` | TURN username | *None* |
-| `TURN_CREDENTIAL` | TURN password / credential | *None* |
+| `TURN_SERVER_URL`, `TURN_USERNAME`, `TURN_CREDENTIAL` | Optional TURN credentials for mesh fallback | Configure only with a TURN provider |
 
-> **Security Note:** Secrets like `GEMINI_API_KEY` and TURN credentials are kept strictly out of source control. Never commit `.env` files.
+The full variable template is in `.env.example`. Keep production values in Render's environment-variable settings, not in GitHub.
 
----
+## Deploy to Render
 
-## 🚀 Running OmniMeet Locally
+The repository includes `render.yaml`, a Render Blueprint for one Docker web service in the Singapore region. It mounts a 1 GB persistent disk at `/app/data` for the SQLite database. Render assigns a public HTTPS URL, which the app uses when generating share links.
 
-### Quick Start (Local Python)
+1. Push the project, including `render.yaml`, to a GitHub repository.
+2. In Render, create a **New Blueprint Instance** and select that repository and branch.
+3. Provide `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` when Render prompts for the Blueprint secrets. Use the public `wss://` URL from LiveKit Cloud; do not use the local Docker hostname.
+4. Deploy and wait for the `/health` check to pass. Open the assigned `https://<service-name>.onrender.com` URL, create a meeting, then share that meeting's generated URL.
+5. Optionally set `GEMINI_API_KEY` in the Render service settings. For a custom domain, configure it in Render and set `PUBLIC_APP_URL` to its HTTPS origin.
 
-1. **Install dependencies:**
-   ```bash
-   cd backend-gateway
-   pip install -r requirements.txt
-   ```
+The gateway handles web traffic and signaling; browsers connect to LiveKit separately for media. Render supports web-service WebSockets. A persistent disk is limited to one service instance and prevents horizontal scaling, so this SQLite setup is intended for a small deployment. Review Render's [Blueprint](https://render.com/docs/blueprint-spec), [disk](https://render.com/docs/disks), and [WebSocket](https://render.com/docs/websocket) documentation and current pricing before deployment.
 
-2. **Run the gateway:**
-   ```bash
-   python main.py
-   ```
-   Or:
-   ```bash
-   python -m uvicorn main:app --host 0.0.0.0 --port 8000
-   ```
+## Limitations and production notes
 
-3. **Open the application:**
-   Navigate to `http://localhost:8000` in your browser.
+- **Network reachability:** LiveKit Cloud or another public SFU/TURN-capable service is needed for reliable media across different networks. Device permissions, unsupported browsers, or restrictive networks can still prevent a call.
+- **Database scale:** SQLite on a Render disk supports one service instance. For multiple gateway instances, migrate to a shared database such as PostgreSQL and add shared coordination for room state.
+- **Service credentials:** Do not commit `.env` files or paste production secrets into source files. Configure secrets in Render.
+- **AI features:** Copilot and speech/translation behavior depend on the relevant API key, browser capabilities, and model/service availability.
 
-### Docker Compose Setup (with LiveKit SFU)
+## Troubleshooting
 
-To run both OmniMeet Gateway and a local LiveKit SFU server:
-```bash
-docker-compose up --build
-```
-This starts:
-- OmniMeet Gateway on `http://localhost:8000`
-- LiveKit SFU Server on `http://localhost:7880` (signaling) and `7882/udp` (media)
+- **A shared link opens locally:** Confirm the guest uses the deployed HTTPS URL, not `localhost` or a LAN address.
+- **Meeting opens but media does not connect:** Check that the Render `LIVEKIT_URL` is the public secure WebSocket URL and that both LiveKit credentials are correct.
+- **Meeting records disappear after restart:** Confirm the Render disk is mounted at `/app/data` and `SQLITE_DB_PATH` is `/app/data/omnimeet.db`.
+- **Copilot has no hosted responses:** Configure `GEMINI_API_KEY` in the environment and redeploy/restart the service.
+- **Camera or microphone is unavailable:** Allow browser permissions, select the correct device, and use HTTPS for remote access.
 
----
-
-## 🧪 Testing & Verification
-
-Run the automated test suite covering meeting creation, code validation, SQLite persistence, chat persistence, and ICE configuration:
-
-```bash
-cd backend-gateway
-pytest tests/test_omnimeet.py -v
-```
-
-All 13 test suites execute and pass deterministically.
-
----
-
-## 📱 User Workflow Walkthrough
-
-1. **Landing Screen:**
-   - Enter your display name and spoken language.
-   - Click **"New meeting"** to generate a unique code (e.g. `abc-defg-hij`) and shareable link.
-   - Or paste a code or link into **"Enter a code or link"** and click **Join**.
-2. **Pre-Join Green Room:**
-   - Check your camera video and speak to see the live audio level meter.
-   - Toggle microphone or camera off if desired.
-   - Click **"Join now"** or **"Present"** to join and immediately share your screen.
-3. **In-Meeting Call:**
-   - Top header displays the unique meeting code, active transport pill, participant count, and call duration.
-   - Bottom dock controls for Mic, Camera, Screen Sharing, Raise Hand, Captions, Chat, Copilot, and Leave.
-   - Subtitles stream in real time with speaker attribution and translation.
-   - In-meeting Chat messages are synchronized and saved to the meeting database.
-4. **Leave & Meeting Archive:**
-   - Click **"Leave"** to exit the room safely.
-   - On the post-meeting screen, click **"View meeting records & notes"** to review persistent transcripts, chat history, action items, and export a Markdown MoM document.
