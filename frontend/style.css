@@ -3711,13 +3711,6 @@ input:checked + .slider-round:before {
   flex-shrink: 0;
 }
 
-.brand-tag-ai {
-  color: var(--primary-blue);
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0;
-}
-
 .workspace-dropdown {
   min-width: 0;
   max-width: min(34vw, 260px);
@@ -3737,7 +3730,7 @@ input:checked + .slider-round:before {
 @media (max-width: 1400px) {
   .bottom-controls-dock {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) minmax(160px, 1fr);
     grid-template-areas:
       "controls controls"
       "meeting leave";
@@ -3767,6 +3760,9 @@ input:checked + .slider-round:before {
   .dock-right-action {
     grid-area: leave;
     min-width: 0;
+    width: 100%;
+    justify-self: stretch;
+    justify-content: flex-end;
   }
 }
 
@@ -3783,10 +3779,6 @@ input:checked + .slider-round:before {
 
   .brand-name {
     font-size: 16px;
-  }
-
-  .brand-tag-ai {
-    font-size: 12px;
   }
 
   .top-divider,
@@ -3808,6 +3800,7 @@ input:checked + .slider-round:before {
   }
 
   .bottom-controls-dock {
+    grid-template-columns: minmax(0, 1fr) minmax(138px, 1fr);
     padding: 8px;
     gap: 8px;
   }
