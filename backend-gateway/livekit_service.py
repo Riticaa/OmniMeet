@@ -7,9 +7,10 @@ Handles LiveKit token issuance for SFU room transport and WebRTC ICE server
 import os
 import time
 from typing import Dict, Any, Optional
+from urllib.parse import urlsplit
 import jwt
 
-LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "ws://localhost:7880")
+LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "").strip()
 LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
 
@@ -22,8 +23,15 @@ TURN_CREDENTIAL = os.environ.get("TURN_CREDENTIAL", "")
 
 
 def is_livekit_configured() -> bool:
-    """Returns True if LiveKit server credentials are set."""
-    return bool(LIVEKIT_API_KEY and LIVEKIT_API_SECRET and LIVEKIT_URL)
+    """Return True only when credentials and an explicit WebSocket URL are valid."""
+    if not (LIVEKIT_API_KEY and LIVEKIT_API_SECRET and LIVEKIT_URL):
+        return False
+
+    try:
+        parsed_url = urlsplit(LIVEKIT_URL)
+        return parsed_url.scheme in {"ws", "wss"} and bool(parsed_url.hostname)
+    except ValueError:
+        return False
 
 
 def generate_livekit_token(room_name: str, identity: str, name: str) -> str:
