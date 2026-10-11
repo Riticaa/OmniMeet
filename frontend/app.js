@@ -336,6 +336,10 @@ function updateUserAvatar() {
 
 // Stage Navigation Controller: "home" | "lobby" | "meeting" | "post-meeting"
 function switchMainView(view) {
+  if (state.currentView === "meeting" && (view === "home" || view === "lobby")) {
+    showToast("Leave the call before leaving the meeting screen");
+    return;
+  }
   if (view !== "meeting" && state.wsReconnectTimer) {
     clearTimeout(state.wsReconnectTimer);
     state.wsReconnectTimer = null;
