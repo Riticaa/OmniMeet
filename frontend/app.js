@@ -36,6 +36,9 @@ const state = {
   sourceLang: "en",
   targetLang: "en",
   ws: null,
+  wsReconnectTimer: null,
+  wsReconnectAttempts: 0,
+  wsHasConnected: false,
   broadcastChannel: null,
   peers: {}, // { [userId]: { name, lang, targetLang, initials, isMuted, isCameraOn, isScreenSharing, isDemo } }
   speechRecognition: null,
@@ -333,6 +336,12 @@ function updateUserAvatar() {
 
 // Stage Navigation Controller: "home" | "lobby" | "meeting" | "post-meeting"
 function switchMainView(view) {
+  if (view !== "meeting" && state.wsReconnectTimer) {
+    clearTimeout(state.wsReconnectTimer);
+    state.wsReconnectTimer = null;
+    state.wsReconnectAttempts = 0;
+    state.wsHasConnected = false;
+  }
   state.currentView = view;
 
   homeStage?.classList.add("hidden");
@@ -371,8 +380,14 @@ function switchMainView(view) {
 //  WEBSOCKET & BACKEND COMMUNICATION
 // ============================================================
 function connectWebSocket() {
+  if (state.wsReconnectTimer) {
+    clearTimeout(state.wsReconnectTimer);
+    state.wsReconnectTimer = null;
+  }
   if (state.ws) {
-    try { state.ws.close(); } catch (e) {}
+    const previousSocket = state.ws;
+    state.ws = null;
+    try { previousSocket.close(); } catch (e) {}
   }
 
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -382,14 +397,22 @@ function connectWebSocket() {
   updateConnectionStatus("connecting");
 
   try {
-    state.ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(wsUrl);
+    state.ws = ws;
 
-    state.ws.onopen = () => {
+    ws.onopen = () => {
+      if (state.currentView !== "meeting" || state.ws !== ws) {
+        ws.close();
+        return;
+      }
+      state.wsReconnectAttempts = 0;
+      state.wsHasConnected = true;
       state.isConnected = true;
       updateConnectionStatus("online");
+      broadcastLocalPeerState();
     };
 
-    state.ws.onmessage = async (event) => {
+    ws.onmessage = async (event) => {
       try {
         const data = JSON.parse(event.data);
         await handleServerEvent(data);
@@ -398,21 +421,44 @@ function connectWebSocket() {
       }
     };
 
-    state.ws.onclose = () => {
+    ws.onclose = () => {
+      if (state.ws !== ws) return;
+      state.ws = null;
       state.isConnected = false;
-      updateConnectionStatus("offline");
-      // Clean up remote peer WebRTC connections
+      const shouldReconnect = state.currentView === "meeting";
+      updateConnectionStatus(shouldReconnect ? "reconnecting" : "offline");
       cleanupAllPeerConnections();
+      if (shouldReconnect) {
+        if (state.wsHasConnected) showToast("Connection interrupted. Reconnecting to the meeting…");
+        scheduleWebSocketReconnect();
+      }
     };
 
-    state.ws.onerror = () => {
+    ws.onerror = () => {
       state.isConnected = false;
-      updateConnectionStatus("offline");
+      if (state.currentView === "meeting") updateConnectionStatus("reconnecting");
     };
   } catch (err) {
     console.warn("[WS] WebSocket initialization error:", err);
-    updateConnectionStatus("offline");
+    state.ws = null;
+    state.isConnected = false;
+    if (state.currentView === "meeting") {
+      updateConnectionStatus("reconnecting");
+      scheduleWebSocketReconnect();
+    } else {
+      updateConnectionStatus("offline");
+    }
   }
+}
+
+function scheduleWebSocketReconnect() {
+  if (state.currentView !== "meeting" || state.wsReconnectTimer) return;
+  const retry = state.wsReconnectAttempts++;
+  const delay = Math.min(1000 * (2 ** Math.min(retry, 5)), 30000);
+  state.wsReconnectTimer = setTimeout(() => {
+    state.wsReconnectTimer = null;
+    if (state.currentView === "meeting" && !state.isConnected) connectWebSocket();
+  }, delay);
 }
 
 function updateConnectionStatus(status) {
@@ -423,6 +469,10 @@ function updateConnectionStatus(status) {
   } else if (status === "connecting") {
     if (gatewayStatus) gatewayStatus.textContent = "Connecting...";
     if (headerConnLabel) headerConnLabel.textContent = "Gateway: Connecting...";
+    if (headerConnDot) headerConnDot.style.background = "#f59e0b";
+  } else if (status === "reconnecting") {
+    if (gatewayStatus) gatewayStatus.textContent = "Reconnecting...";
+    if (headerConnLabel) headerConnLabel.textContent = "Gateway: Reconnecting...";
     if (headerConnDot) headerConnDot.style.background = "#f59e0b";
   } else {
     if (gatewayStatus) gatewayStatus.textContent = "Standby (Local)";
@@ -646,6 +696,8 @@ function attachLocalTracksToPC(pc) {
 }
 
 async function initiatePeerConnection(peerId) {
+  // One stable caller per peer pair prevents simultaneous SDP offers on reconnect.
+  if (String(state.userId).localeCompare(String(peerId)) > 0) return;
   try {
     const pc = createPeerConnection(peerId);
     const offer = await pc.createOffer({
