@@ -5,14 +5,44 @@ into synchronized English subtitles.
 """
 
 import time
+import json
+import os
+import urllib.parse
+import urllib.request
 from typing import Dict, Any, Optional
 
 
 class TranslationEngine:
     def __init__(self, default_target_lang: str = "en"):
         self.default_target_lang = default_target_lang
+        self.google_cloud_api_key = os.getenv("GOOGLE_TRANSLATE_API_KEY", "").strip()
         self.models: Dict[str, Any] = {}
         self.tokenizers: Dict[str, Any] = {}
+
+    def _translate_with_google_cloud(self, text: str, source_lang: str, target_lang: str) -> Optional[str]:
+        """Use the authenticated Cloud Translation Basic API when configured."""
+        if not self.google_cloud_api_key:
+            return None
+
+        query = urllib.parse.urlencode({"key": self.google_cloud_api_key})
+        body = {"q": text, "target": target_lang, "format": "text"}
+        if source_lang != "auto":
+            body["source"] = source_lang
+        request = urllib.request.Request(
+            f"https://translation.googleapis.com/language/translate/v2?{query}",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=6.0) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            translations = result.get("data", {}).get("translations", [])
+            translated = translations[0].get("translatedText", "").strip() if translations else ""
+            return translated or None
+        except Exception:
+            # Do not log request URLs because they contain the API key.
+            return None
 
     def _get_marian_model(self, src: str, tgt: str):
         pair = f"{src}-{tgt}"
@@ -61,6 +91,16 @@ class TranslationEngine:
         # Normalize language codes
         src_map = {"hi": "hi", "hindi": "hi", "es": "es", "spanish": "es", "fr": "fr", "french": "fr", "de": "de", "german": "de"}
         norm_src = src_map.get(source_lang.lower(), source_lang.lower())
+
+        # Prefer Google's supported, authenticated API in configured environments.
+        cloud_translation = self._translate_with_google_cloud(text, norm_src, target_lang.lower())
+        if cloud_translation:
+            return {
+                "translated_text": cloud_translation,
+                "source_lang": norm_src,
+                "target_lang": target_lang,
+                "latency_ms": (time.time() - start_time) * 1000
+            }
 
         # Attempt HuggingFace MarianMT for supported pairs
         model, tokenizer = self._get_marian_model(norm_src, target_lang.lower())
