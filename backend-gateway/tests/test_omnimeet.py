@@ -187,6 +187,22 @@ def test_livekit_token_fallback():
     assert isinstance(config["iceServers"], list)
 
 
+def test_livekit_requires_an_explicit_valid_websocket_url(monkeypatch):
+    """Missing or malformed LiveKit URLs must not be reported as configured."""
+    monkeypatch.setattr(livekit_service, "LIVEKIT_API_KEY", "test-key")
+    monkeypatch.setattr(livekit_service, "LIVEKIT_API_SECRET", "test-secret")
+
+    monkeypatch.setattr(livekit_service, "LIVEKIT_URL", "")
+    assert livekit_service.is_livekit_configured() is False
+    assert livekit_service.get_media_transport_config("room", "user", "Guest")["mode"] == "p2p_mesh"
+
+    monkeypatch.setattr(livekit_service, "LIVEKIT_URL", "https://livekit.example.com")
+    assert livekit_service.is_livekit_configured() is False
+
+    monkeypatch.setattr(livekit_service, "LIVEKIT_URL", "wss://livekit.example.com")
+    assert livekit_service.is_livekit_configured() is True
+
+
 # ==============================================================================
 # 4. FastAPI REST Endpoints Integration
 # ==============================================================================
