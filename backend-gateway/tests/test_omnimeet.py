@@ -215,6 +215,24 @@ def test_health_endpoint():
     assert "database_persistence" in data
 
 
+def test_frontend_routes_serve_the_complete_meeting_client():
+    """Meeting links and their versioned client assets must load for guests."""
+    home = client.get("/")
+    meeting = client.get("/meet/abc-defg-hij")
+    assert home.status_code == 200
+    assert meeting.status_code == 200
+    assert 'href="/style.css?v=' in meeting.text
+    assert 'src="/app.js?v=' in meeting.text
+
+    scripts = client.get("/app.js")
+    styles = client.get("/style.css")
+    assert scripts.status_code == 200
+    assert styles.status_code == 200
+    assert "function handleJoinMeeting(" in scripts.text
+    assert "function handleLeaveCall(" in scripts.text
+    assert "function submitCopilotQuestion(" in scripts.text
+
+
 def test_webrtc_config_endpoint():
     res = client.get("/api/config/webrtc")
     assert res.status_code == 200
