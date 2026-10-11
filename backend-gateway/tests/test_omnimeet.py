@@ -235,6 +235,7 @@ def test_frontend_routes_serve_the_complete_meeting_client():
     assert "async function translateTextDetailed(" in scripts.text
     assert "Translation unavailable" in scripts.text
     assert "rec.onend = () =>" in scripts.text
+    assert "Object.assign(transcriptRecord, data)" in scripts.text
 
 
 def test_translation_endpoint_reports_unavailable_provider(monkeypatch):
