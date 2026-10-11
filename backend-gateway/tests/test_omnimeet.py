@@ -6,6 +6,7 @@ LiveKit token issuance, action items CRUD, and Copilot grounded intelligence.
 
 import os
 import sys
+import json
 import pytest
 from pathlib import Path
 
@@ -18,6 +19,7 @@ import meeting_utils
 import livekit_service
 import main
 from copilot_engine import OmniCopilotEngine
+from translator_engine import TranslationEngine
 from main import app
 from fastapi.testclient import TestClient
 
@@ -248,6 +250,38 @@ def test_translation_endpoint_reports_unavailable_provider(monkeypatch):
     })
     assert res.status_code == 200
     assert res.json() == {"translatedText": "Bonjour tout le monde", "translated": False}
+
+
+def test_google_cloud_translation_uses_server_side_api_key(monkeypatch):
+    """Configured Cloud Translation responses are consumed without a live network call."""
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"data": {"translations": [{"translatedText": "Hello everyone"}]}}).encode()
+
+    seen = {}
+
+    def fake_urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["body"] = json.loads(request.data.decode())
+        seen["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    engine = TranslationEngine()
+    engine.google_cloud_api_key = "test-only-key"
+    result = engine.translate("Bonjour tout le monde", "fr", "en")
+
+    assert result["translated_text"] == "Hello everyone"
+    assert "translation.googleapis.com/language/translate/v2" in seen["url"]
+    assert "test-only-key" in seen["url"]
+    assert seen["body"] == {"q": "Bonjour tout le monde", "target": "en", "format": "text", "source": "fr"}
+    assert seen["timeout"] == 6.0
 
 
 def test_webrtc_config_endpoint():
