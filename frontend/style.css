@@ -3692,3 +3692,139 @@ input:checked + .slider-round:before {
   word-break: break-word;
   max-width: 85%;
 }
+
+/* Keep the meeting dock and application header inside narrow viewports. */
+.app-layout,
+.app-main-viewport,
+.meeting-main-content {
+  min-width: 0;
+}
+
+.top-nav-bar,
+.top-nav-left,
+.top-nav-right {
+  min-width: 0;
+}
+
+.brand-title-wrap {
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.brand-tag-ai {
+  color: var(--primary-blue);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.workspace-dropdown {
+  min-width: 0;
+  max-width: min(34vw, 260px);
+}
+
+#headerRoomLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bottom-controls-dock {
+  width: 100%;
+  min-width: 0;
+}
+
+@media (max-width: 1400px) {
+  .bottom-controls-dock {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "controls controls"
+      "meeting leave";
+    gap: 8px 12px;
+    justify-content: normal;
+    padding: 8px 12px;
+  }
+
+  .dock-left-status {
+    grid-area: meeting;
+    min-width: 0;
+  }
+
+  .dock-center-buttons {
+    grid-area: controls;
+    display: grid;
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .dock-btn {
+    min-width: 0;
+    padding: 5px 3px;
+  }
+
+  .dock-right-action {
+    grid-area: leave;
+    min-width: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .top-nav-bar {
+    gap: 8px;
+    padding: 0 10px;
+  }
+
+  .top-nav-left {
+    flex: 1;
+    gap: 8px;
+  }
+
+  .brand-name {
+    font-size: 16px;
+  }
+
+  .brand-tag-ai {
+    font-size: 12px;
+  }
+
+  .top-divider,
+  .workspace-dropdown {
+    display: none;
+  }
+
+  .top-nav-right {
+    flex-shrink: 0;
+    gap: 4px;
+  }
+
+  .secure-badge {
+    padding: 4px 6px;
+  }
+
+  .secure-badge > span:last-child {
+    display: none;
+  }
+
+  .bottom-controls-dock {
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .dock-center-buttons {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 2px;
+  }
+
+  .dock-btn span {
+    font-size: 10px;
+    white-space: nowrap;
+  }
+
+  .leave-call-btn {
+    padding: 8px 12px;
+    white-space: nowrap;
+  }
+}
+
