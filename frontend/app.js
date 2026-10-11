@@ -44,6 +44,9 @@ const state = {
   peers: {}, // { [userId]: { name, lang, targetLang, initials, isMuted, isCameraOn, isScreenSharing, isDemo } }
   speechRecognition: null,
   isRecognizing: false,
+  speechRecognitionBlocked: false,
+  speechRestartTimer: null,
+  speechRestartAttempts: 0,
   isConnected: false,
   isJoining: false,
   isMuted: false,
@@ -1337,10 +1340,8 @@ async function handleSendLiveSpeech() {
 }
 
 async function broadcastSpeechUtterance(originalText, sourceLang) {
-  // Translate locally for an immediate subtitle, then let the gateway fan out
-  // and persist the speech utterance for everyone else in the room.
-  const translated = await translateText(originalText, sourceLang, state.targetLang);
-
+  const timestamp = Date.now();
+  const sameLanguage = sourceLang === state.targetLang;
   const payload = {
     type: "speech_utterance",
     roomId: state.roomId,
@@ -1350,40 +1351,64 @@ async function broadcastSpeechUtterance(originalText, sourceLang) {
     targetLanguage: state.targetLang,
     text: originalText,
     originalText: originalText,
-    translatedText: translated,
-    translations: { [state.targetLang]: translated },
+    translatedText: sameLanguage ? originalText : "",
+    translations: sameLanguage ? { [state.targetLang]: originalText } : {},
+    translationAvailable: sameLanguage,
+    translationPending: !sameLanguage,
     isFinal: true,
-    timestamp: Date.now()
+    timestamp
   };
 
+  // Show what was spoken immediately; translation may need a network request.
   renderConversationItem(payload);
   if (state.broadcastChannel) state.broadcastChannel.postMessage({ ...payload, type: "subtitle_stream" });
 
-  // Send via WebSocket to backend (which translates per user and saves to room data)
+  // Send the source speech immediately so the room can receive captions even
+  // while this browser's translation provider is still responding.
   if (state.ws && state.isConnected) {
     try {
       state.ws.send(JSON.stringify(payload));
     } catch (e) {}
+  }
+
+  if (!sameLanguage) {
+    const result = await translateTextDetailed(originalText, sourceLang, state.targetLang);
+    payload.translatedText = result.translatedText;
+    payload.translations = result.translated ? { [state.targetLang]: result.translatedText } : {};
+    payload.translationAvailable = result.translated;
+    payload.translationPending = false;
+    renderConversationItem(payload);
   }
 }
 
 function renderReceivedSubtitle(data) {
   // If targetLanguage was personalized by backend, use it; otherwise translate locally
   if (data.targetLanguage === state.targetLang && data.translatedText) {
-    renderConversationItem(data);
+    renderConversationItem({ ...data, translationAvailable: data.translationAvailable !== false });
   } else if (data.translations && data.translations[state.targetLang]) {
     renderConversationItem({
       ...data,
       targetLanguage: state.targetLang,
-      translatedText: data.translations[state.targetLang]
+      translatedText: data.translations[state.targetLang],
+      translationAvailable: true
     });
   } else {
-    // Translate client-side as fallback
-    translateText(data.originalText, data.sourceLanguage, state.targetLang).then((trans) => {
+    // Show the original while the local fallback tries to translate it.
+    const pending = {
+      ...data,
+      targetLanguage: state.targetLang,
+      translatedText: data.sourceLanguage === state.targetLang ? data.originalText : "",
+      translationAvailable: data.sourceLanguage === state.targetLang,
+      translationPending: data.sourceLanguage !== state.targetLang
+    };
+    renderConversationItem(pending);
+    translateTextDetailed(data.originalText, data.sourceLanguage, state.targetLang).then((result) => {
       renderConversationItem({
-        ...data,
+        ...pending,
         targetLanguage: state.targetLang,
-        translatedText: trans
+        translatedText: result.translatedText,
+        translationAvailable: result.translated,
+        translationPending: false
       });
     });
   }
@@ -1398,8 +1423,19 @@ function renderConversationItem(data) {
   );
   if (existingDomItem) {
     const transEl = existingDomItem.querySelector(".item-translated-text");
-    if (transEl && data.translatedText) {
-      transEl.textContent = data.translatedText;
+    if (transEl) {
+      const displayTranslation = data.translationPending
+        ? "Translating…"
+        : data.translationAvailable === false
+          ? "Translation unavailable"
+          : (data.translatedText || "");
+      transEl.textContent = displayTranslation;
+      existingDomItem.dataset.translated = (data.translatedText || "").toLowerCase();
+      const playButton = existingDomItem.querySelector(".tts-play-btn");
+      if (playButton) {
+        playButton.dataset.text = data.translatedText || "";
+        playButton.disabled = !data.translatedText;
+      }
     }
     return;
   }
@@ -1417,7 +1453,12 @@ function renderConversationItem(data) {
 
   const speaker = data.senderName || "Speaker";
   const orig = data.originalText || "";
-  const trans = data.translatedText || orig;
+  const trans = data.translatedText || "";
+  const displayTranslation = data.translationPending
+    ? "Translating…"
+    : data.translationAvailable === false
+      ? "Translation unavailable"
+      : (trans || orig);
   const src = (data.sourceLanguage || "en").toUpperCase();
   const tgt = (data.targetLanguage || state.targetLang || "en").toUpperCase();
   const langPair = `${src} → ${tgt}`;
@@ -1454,12 +1495,12 @@ function renderConversationItem(data) {
         <span class="item-speaker-name">${cleanName}${data.isDemo ? ' <span style="font-size:10px; background:#ea580c; color:#fff; padding:1px 4px; border-radius:3px; font-weight:700;">DEMO</span>' : ''}</span>
         <span class="item-lang-pair">${langPair}</span>
         <span class="item-timestamp">${timeStr}</span>
-        <button class="tts-play-btn" title="Play speech audio" data-text="${escapeHtml(trans)}">
+        <button class="tts-play-btn" title="Play speech audio" data-text="${escapeHtml(trans)}" ${trans ? "" : "disabled"}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
         </button>
       </div>
       <div class="item-original-text" style="display: ${state.showOriginal ? 'block' : 'none'};">${escapeHtml(orig)}</div>
-      <div class="item-translated-text">${escapeHtml(trans)}</div>
+      <div class="item-translated-text">${escapeHtml(displayTranslation)}</div>
     </div>
   `;
 
@@ -2003,6 +2044,25 @@ function setupWebSpeechRecognition() {
   rec.interimResults = false;
   rec.lang = getSpeechLangCode(state.sourceLang);
 
+  rec.onstart = () => {
+    state.isRecognizing = true;
+    state.speechRecognitionBlocked = false;
+    state.speechRestartAttempts = 0;
+    if (speechRecognitionStatus) speechRecognitionStatus.textContent = "Live speech captions are active.";
+  };
+
+  rec.onend = () => {
+    state.isRecognizing = false;
+    clearTimeout(state.speechRestartTimer);
+    state.speechRestartTimer = null;
+    const shouldRun = state.currentView === "meeting" && !state.isMuted && !state.aiPipelineStatus.asrLoaded;
+    if (shouldRun && !state.speechRecognitionBlocked) {
+      const delay = Math.min(700 * (2 ** state.speechRestartAttempts), 8000);
+      state.speechRestartAttempts += 1;
+      state.speechRestartTimer = setTimeout(() => syncSpeechRecognitionMode(), delay);
+    }
+  };
+
   rec.onresult = async (event) => {
     const last = event.results.length - 1;
     const text = event.results[last][0].transcript.trim();
@@ -2012,8 +2072,16 @@ function setupWebSpeechRecognition() {
   };
 
   rec.onerror = (e) => {
+    state.isRecognizing = false;
     if (e.error !== "no-speech") {
       console.log("[SpeechRecognition] Notice:", e.error);
+    }
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      state.speechRecognitionBlocked = true;
+      if (speechRecognitionStatus) speechRecognitionStatus.textContent = "Microphone or speech recognition permission is blocked. Allow microphone access in your browser, then reload.";
+      showToast("Allow microphone access in your browser to enable live captions.");
+    } else if (e.error !== "no-speech" && speechRecognitionStatus) {
+      speechRecognitionStatus.textContent = `Speech recognition paused (${e.error}). Check your connection and microphone.`;
     }
   };
 
@@ -2023,17 +2091,22 @@ function setupWebSpeechRecognition() {
 function syncSpeechRecognitionMode() {
   if (!state.speechRecognition) return;
   const shouldRun = state.currentView === "meeting" && !state.isMuted && !state.aiPipelineStatus.asrLoaded;
-  if (shouldRun && !state.isRecognizing) {
+  if (!shouldRun) {
+    clearTimeout(state.speechRestartTimer);
+    state.speechRestartTimer = null;
+    if (state.isRecognizing) {
+      try { state.speechRecognition.stop(); } catch (err) {}
+    }
+    state.isRecognizing = false;
+  } else if (!state.isRecognizing && !state.speechRecognitionBlocked) {
     try {
       state.speechRecognition.lang = getSpeechLangCode(state.sourceLang);
       state.speechRecognition.start();
+      // Some implementations do not emit onstart consistently; avoid rapid duplicate starts.
       state.isRecognizing = true;
     } catch (err) {
-      // Browsers throw if recognition is already starting; onend will resync it.
+      // Browser throws while recognition is already starting; onend/onstart will resync it.
     }
-  } else if (!shouldRun && state.isRecognizing) {
-    try { state.speechRecognition.stop(); } catch (err) {}
-    state.isRecognizing = false;
   }
 }
 
@@ -3063,8 +3136,9 @@ function detectPhraseLanguage(text) {
   return state.sourceLang || "en";
 }
 
-async function translateText(text, srcLang, tgtLang) {
-  if (!text || srcLang === tgtLang) return text;
+async function translateTextDetailed(text, srcLang, tgtLang) {
+  if (!text) return { translatedText: "", translated: false };
+  if (srcLang === tgtLang) return { translatedText: text, translated: true };
 
   try {
     const gatewayResponse = await fetch("/api/translate", {
@@ -3075,7 +3149,9 @@ async function translateText(text, srcLang, tgtLang) {
     });
     if (gatewayResponse.ok) {
       const result = await gatewayResponse.json();
-      if (result.translated && result.translatedText) return result.translatedText;
+      if (result.translated && result.translatedText) {
+        return { translatedText: result.translatedText, translated: true };
+      }
     }
   } catch (err) {
     // Try the browser fallback when the gateway translation provider is unavailable.
@@ -3095,14 +3171,22 @@ async function translateText(text, srcLang, tgtLang) {
     if (res.ok) {
       const data = await res.json();
       if (data && data[0]) {
-        return data[0].map((chunk) => chunk[0]).join("");
+        const translatedText = data[0].map((chunk) => chunk[0]).join("").trim();
+        if (translatedText) {
+          return { translatedText, translated: true };
+        }
       }
     }
   } catch (err) {
     // Offline or network error
   }
 
-  return text;
+  return { translatedText: "", translated: false };
+}
+
+async function translateText(text, srcLang, tgtLang) {
+  const result = await translateTextDetailed(text, srcLang, tgtLang);
+  return result.translated ? result.translatedText : text;
 }
 
 function resampleTo16k(audioBuffer, originalSampleRate) {
