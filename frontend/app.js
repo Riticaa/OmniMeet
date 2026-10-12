@@ -3151,7 +3151,7 @@ async function translateTextDetailed(text, srcLang, tgtLang) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, sourceLanguage: srcLang, targetLanguage: tgtLang }),
-      signal: AbortSignal.timeout(5000)
+      signal: AbortSignal.timeout(60000)
     });
     if (gatewayResponse.ok) {
       const result = await gatewayResponse.json();
@@ -3160,31 +3160,7 @@ async function translateTextDetailed(text, srcLang, tgtLang) {
       }
     }
   } catch (err) {
-    // Try the browser fallback when the gateway translation provider is unavailable.
-  }
-
-  try {
-    const sl = srcLang === "auto" ? "auto" : srcLang;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2600);
-
-    const res = await fetch(
-      `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sl}&tl=${tgtLang}&dt=t&q=${encodeURIComponent(text)}`,
-      { signal: controller.signal }
-    );
-    clearTimeout(timeoutId);
-
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data[0]) {
-        const translatedText = data[0].map((chunk) => chunk[0]).join("").trim();
-        if (translatedText) {
-          return { translatedText, translated: true };
-        }
-      }
-    }
-  } catch (err) {
-    // Offline or network error
+    // The gateway may be downloading a translation model on first use.
   }
 
   return { translatedText: "", translated: false };
