@@ -236,6 +236,8 @@ def test_frontend_routes_serve_the_complete_meeting_client():
     assert "function submitCopilotQuestion(" in scripts.text
     assert "async function translateTextDetailed(" in scripts.text
     assert "Translation unavailable" in scripts.text
+    assert "bonjour|merci|réunion|tous|bienvenue|aujourd'hui" in scripts.text
+    assert "Speech recognition is unavailable in this browser" in scripts.text
     assert "rec.onend = () =>" in scripts.text
     assert "Object.assign(transcriptRecord, data)" in scripts.text
 
