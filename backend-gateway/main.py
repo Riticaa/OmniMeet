@@ -62,6 +62,14 @@ AI_SERVICES_DIR = BASE_DIR.parent / "ai-services"
 if str(AI_SERVICES_DIR) not in sys.path:
     sys.path.insert(0, str(AI_SERVICES_DIR))
 
+# Initialize the optional translation engine independently of the speech-recognition pipeline.
+try:
+    from translator_engine import TranslationEngine
+    translation_engine = TranslationEngine(default_target_lang=os.getenv("DEFAULT_TARGET_LANGUAGE", "en"))
+except Exception as exc:
+    translation_engine = None
+    print(f"[!] Translation engine unavailable: {exc}")
+
 # Initialize AI Speech Pipeline & OmniCopilot Engine
 try:
     from pipeline import OmniMeetAIPipeline
@@ -268,7 +276,20 @@ class RoomManager:
         if ai_pipeline:
             for tgt in target_langs:
                 if tgt not in translations:
-                    translations[tgt] = ai_pipeline.translate_text(orig_text, src_lang, tgt)
+                    candidate = ai_pipeline.translate_text(orig_text, src_lang, tgt)
+                    if candidate and candidate.strip() != orig_text.strip():
+                        translations[tgt] = candidate
+        elif translation_engine:
+            for tgt in target_langs:
+                if tgt not in translations:
+                    result = await asyncio.to_thread(translation_engine.translate, orig_text, src_lang, tgt)
+                    candidate = result.get("translated_text", "")
+                    if (
+                        candidate
+                        and not candidate.startswith("[Translated to ")
+                        and candidate.strip() != orig_text.strip()
+                    ):
+                        translations[tgt] = candidate
 
         sub_event["translations"] = translations
 
@@ -293,6 +314,35 @@ manager = RoomManager()
 # ==============================================================================
 # REST API: Meeting Creation & Management
 # ==============================================================================
+
+class TranslateRequest(BaseModel):
+    text: str
+    sourceLanguage: str = "auto"
+    targetLanguage: str = "en"
+
+
+@app.post("/api/translate")
+async def translate_text_endpoint(request: TranslateRequest):
+    text = request.text.strip()
+    if not text:
+        return {"translatedText": "", "translated": True}
+    if len(text) > 5000:
+        raise HTTPException(status_code=413, detail="Text is too long to translate")
+    if request.sourceLanguage == request.targetLanguage:
+        return {"translatedText": text, "translated": True}
+    if not translation_engine:
+        return {"translatedText": text, "translated": False}
+    result = await asyncio.to_thread(
+        translation_engine.translate, text, request.sourceLanguage, request.targetLanguage
+    )
+    translated = result.get("translated_text", text)
+    is_real_translation = (
+        bool(translated)
+        and not translated.startswith("[Translated to ")
+        and translated.strip() != text
+    )
+    return {"translatedText": translated if is_real_translation else text, "translated": is_real_translation}
+
 
 class CreateMeetingRequest(BaseModel):
     title: Optional[str] = "OmniMeet Conference"
