@@ -7,6 +7,7 @@ into synchronized English subtitles.
 import time
 import json
 import os
+import threading
 import urllib.parse
 import urllib.request
 from typing import Dict, Any, Optional
@@ -15,9 +16,70 @@ from typing import Dict, Any, Optional
 class TranslationEngine:
     def __init__(self, default_target_lang: str = "en"):
         self.default_target_lang = default_target_lang
+        self.translation_provider = os.getenv("TRANSLATION_PROVIDER", "argos").strip().lower()
+        self.argos_auto_install = os.getenv("ARGOS_AUTO_INSTALL_MODELS", "true").lower() in {"1", "true", "yes", "on"}
         self.google_cloud_api_key = os.getenv("GOOGLE_TRANSLATE_API_KEY", "").strip()
-        self.models: Dict[str, Any] = {}
-        self.tokenizers: Dict[str, Any] = {}
+        self._argos_install_lock = threading.Lock()
+
+    def _translate_with_argos(self, text: str, source_lang: str, target_lang: str) -> Optional[str]:
+        """Translate offline with Argos, installing only the needed pair(s) on first use."""
+        if source_lang == "auto":
+            return None
+        try:
+            from argostranslate import package as argos_package
+            from argostranslate import translate as argos_translate
+        except Exception:
+            return None
+
+        def get_translation():
+            try:
+                source = argos_translate.get_language_from_code(source_lang)
+                target = argos_translate.get_language_from_code(target_lang)
+                return source.get_translation(target) if source and target else None
+            except Exception:
+                return None
+
+        translation = get_translation()
+        if translation or not self.argos_auto_install:
+            return translation.translate(text) if translation else None
+
+        pair = (source_lang, target_lang)
+        with self._argos_install_lock:
+            # Another request may have installed the package while this one waited.
+            translation = get_translation()
+            if translation:
+                return translation.translate(text)
+
+            try:
+                available = argos_package.get_available_packages()
+                available_pairs = {(item.from_code, item.to_code): item for item in available}
+                installed_pairs = {
+                    (item.from_code, item.to_code)
+                    for item in argos_package.get_installed_packages()
+                }
+
+                # Prefer a direct model. If Argos has no direct model, it can chain
+                # source→English→target when those two packages are installed.
+                routes = [(pair,)]
+                if source_lang != "en" and target_lang != "en":
+                    routes.append(((source_lang, "en"), ("en", target_lang)))
+
+                for route in routes:
+                    if all(
+                        step in installed_pairs or step in available_pairs
+                        for step in route
+                    ):
+                        for step in route:
+                            if step not in installed_pairs and step in available_pairs:
+                                available_pairs[step].install()
+                                installed_pairs.add(step)
+                        translation = get_translation()
+                        if translation:
+                            return translation.translate(text)
+            except Exception as exc:
+                print(f"[Translation] Argos model unavailable for {source_lang}→{target_lang}: {exc}")
+
+        return None
 
     def _translate_with_google_cloud(self, text: str, source_lang: str, target_lang: str) -> Optional[str]:
         """Use the authenticated Cloud Translation Basic API when configured."""
@@ -43,25 +105,6 @@ class TranslationEngine:
         except Exception:
             # Do not log request URLs because they contain the API key.
             return None
-
-    def _get_marian_model(self, src: str, tgt: str):
-        pair = f"{src}-{tgt}"
-        if pair in self.models:
-            return self.models[pair], self.tokenizers[pair]
-
-        try:
-            from transformers import MarianMTModel, MarianTokenizer
-            model_name = f"Helsinki-NLP/opus-mt-{src}-{tgt}"
-            print(f"[*] Loading MarianMT model: {model_name}...")
-            tokenizer = MarianTokenizer.from_pretrained(model_name)
-            model = MarianMTModel.from_pretrained(model_name)
-            self.models[pair] = model
-            self.tokenizers[pair] = tokenizer
-            print(f"[OK] Loaded {pair} translator.")
-            return model, tokenizer
-        except Exception as e:
-            # Model loading deferred or unavailable
-            return None, None
 
     def translate(self, text: str, source_lang: str = "auto", target_lang: str = "en") -> Dict[str, Any]:
         """
@@ -92,82 +135,15 @@ class TranslationEngine:
         src_map = {"hi": "hi", "hindi": "hi", "es": "es", "spanish": "es", "fr": "fr", "french": "fr", "de": "de", "german": "de"}
         norm_src = src_map.get(source_lang.lower(), source_lang.lower())
 
-        # Prefer Google's supported, authenticated API in configured environments.
-        cloud_translation = self._translate_with_google_cloud(text, norm_src, target_lang.lower())
-        if cloud_translation:
-            return {
-                "translated_text": cloud_translation,
-                "source_lang": norm_src,
-                "target_lang": target_lang,
-                "latency_ms": (time.time() - start_time) * 1000
-            }
+        # Free, local translation is the default. The paid Google option is only
+        # used when explicitly selected in the server environment.
+        translated = None
+        if self.translation_provider == "google":
+            translated = self._translate_with_google_cloud(text, norm_src, target_lang.lower())
+        else:
+            translated = self._translate_with_argos(text, norm_src, target_lang.lower())
 
-        # Attempt HuggingFace MarianMT for supported pairs
-        model, tokenizer = self._get_marian_model(norm_src, target_lang.lower())
-        if model is not None and tokenizer is not None:
-            try:
-                inputs = tokenizer([text], return_tensors="pt", padding=True)
-                translated_tokens = model.generate(**inputs, max_length=128)
-                result = tokenizer.decode(translated_tokens[0], skip_special_tokens=True)
-                return {
-                    "translated_text": result,
-                    "source_lang": norm_src,
-                    "target_lang": target_lang,
-                    "latency_ms": (time.time() - start_time) * 1000
-                }
-            except Exception as e:
-                print(f"[!] Translation inference error: {e}")
-
-        # Lightweight fallback: Deep Translator if installed
-        try:
-            from deep_translator import GoogleTranslator
-            translated = GoogleTranslator(source=norm_src if norm_src != 'auto' else 'auto', target=target_lang).translate(text)
-            return {
-                "translated_text": translated,
-                "source_lang": norm_src,
-                "target_lang": target_lang,
-                "latency_ms": (time.time() - start_time) * 1000
-            }
-        except Exception:
-            pass
-
-        # Standard HTTP translation fallback for real end-to-end translations without heavy models
-        try:
-            import urllib.request
-            import urllib.parse
-            import json
-            sl = norm_src if norm_src != 'auto' else 'auto'
-            tl = target_lang.lower()
-            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={sl}&tl={tl}&dt=t&q={urllib.parse.quote(text)}"
-            req = urllib.request.Request(url, headers={"User-Agent": "OmniMeet/1.0"})
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
-                data = json.loads(resp.read().decode('utf-8'))
-                if data and data[0]:
-                    translated_str = "".join([seg[0] for seg in data[0] if seg and seg[0]])
-                    if translated_str:
-                        return {
-                            "translated_text": translated_str,
-                            "source_lang": norm_src,
-                            "target_lang": target_lang,
-                            "latency_ms": (time.time() - start_time) * 1000
-                        }
-        except Exception:
-            pass
-
-        # Built-in instant dictionary demonstration fallback
-        demo_dict = {
-            "नमस्ते": "Hello",
-            "नमस्ते टीम": "Hello team",
-            "धन्यवाद": "Thank you",
-            "हाँ": "Yes",
-            "नहीं": "No",
-            "hola": "hello",
-            "gracias": "thank you",
-            "bonjour": "hello",
-            "merci": "thank you"
-        }
-
-        translated_fallback = demo_dict.get(text.lower(), f"[Translated to {target_lang.upper()}]: {text}")
+        translated_fallback = translated or f"[Translated to {target_lang.upper()}]: {text}"
 
         return {
             "translated_text": translated_fallback,
