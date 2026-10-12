@@ -22,7 +22,7 @@ This guide covers the current architecture, local setup, environment configurati
 - Use LiveKit SFU media or the WebRTC mesh fallback.
 - Use in-meeting chat and room-scoped action items.
 - View meeting records, including saved chat, transcripts, and action items.
-- Use browser speech recognition or the optional local speech pipeline for captions; translation and the Gemini-powered copilot depend on the configured services and keys.
+- Use browser speech recognition or the optional local speech pipeline for captions; subtitles translate locally with Argos Translate, while the Gemini-powered copilot can use its optional API key.
 
 Feature availability depends on browser support, device permissions, network connectivity, and optional service credentials. A local installation is not publicly reachable by invitees unless it is exposed through a hosting provider or secure tunnel.
 
@@ -62,7 +62,9 @@ From the repository root, create an environment and install gateway requirements
 python -m venv .venv
 # Windows PowerShell
 .venv\Scripts\python -m pip install -r backend-gateway/requirements.txt
-# macOS/Linux: .venv/bin/python -m pip install -r backend-gateway/requirements.txt
+.venv\Scripts\python -m pip install -r backend-gateway/requirements-translation.txt
+.venv\Scripts\python -m pip install --no-deps "argostranslate>=1.9.6,<2.0"
+# macOS/Linux: use .venv/bin/python -m pip for each of the three install commands above.
 ```
 
 Start the gateway:
@@ -99,14 +101,19 @@ Set environment variables in a local `.env` file (copy `.env.example` as a start
 | `LIVEKIT_API_SECRET` | LiveKit signing secret | Keep secret outside source control |
 | `GEMINI_API_KEY` | Optional Gemini copilot key | Omit to use the available fallback behavior |
 | `GEMINI_MODEL` | Gemini model name | `gemini-3.5-flash` |
-| `GOOGLE_TRANSLATE_API_KEY` | Google Cloud Translation Basic API key | Required for dependable hosted translation; configure only on the server |
+| `TRANSLATION_PROVIDER` | Translation engine | `argos` by default; set to `google` only if using the paid Google API |
+| `ARGOS_AUTO_INSTALL_MODELS` | Download a missing open-source language-pair model on first use | `true`; requires outbound internet once per model pair |
+| `ARGOS_PACKAGES_DIR` | Cache location for downloaded Argos models | Optional locally; Render uses `/app/data/argos-packages` |
+| `GOOGLE_TRANSLATE_API_KEY` | Optional Google Cloud Translation Basic API key | Used only when `TRANSLATION_PROVIDER=google` |
 | `TURN_SERVER_URL`, `TURN_USERNAME`, `TURN_CREDENTIAL` | Optional TURN credentials for mesh fallback | Configure only with a TURN provider |
 
 The full variable template is in `.env.example`. Keep production values in Render's environment-variable settings, not in GitHub.
 
-### Enable translated subtitles
+### Free translated subtitles
 
-For real translated captions, create a Google Cloud project, enable the Cloud Translation API, configure billing, and create an API key restricted to that API. Set `GOOGLE_TRANSLATE_API_KEY` in your local `.env` file or the Render service's environment settings. The key is used by the gateway and is never sent to meeting participants' browsers. Without a provider key or network access, OmniMeet still shows the source caption and marks the translation as unavailable. See Google's [Cloud Translation setup](https://cloud.google.com/translate/docs/setup) and [API authentication guide](https://cloud.google.com/translate/docs/authentication).
+OmniMeet uses Argos Translate by default. It runs translation models on the gateway, so there is no per-translation API charge. On first use of a language pair, the gateway downloads and caches the needed open-source model; first translation can take longer and the server needs outbound internet for that download. Later translations use the cached model offline. Argos can chain models through English when a direct language-pair model is unavailable. We install Argos without its optional spaCy/Stanza packages to keep the gateway smaller and use the MiniSBD sentence splitter. See the [Argos Translate documentation](https://argos-translate.readthedocs.io/en/latest/) and [package installation example](https://github.com/argosopentech/argostranslate).
+
+The optional `google` provider remains available if `TRANSLATION_PROVIDER=google` and `GOOGLE_TRANSLATE_API_KEY` are configured. Google Cloud Translation requires a Google Cloud project with the API enabled and billing configured; see Google's [setup guide](https://cloud.google.com/translate/docs/setup).
 
 ## Deploy to Render
 
@@ -114,7 +121,7 @@ The repository includes `render.yaml`, a Render Blueprint for one Docker web ser
 
 1. Push the project, including `render.yaml`, to a GitHub repository.
 2. In Render, create a **New Blueprint Instance** and select that repository and branch.
-3. Provide `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` when Render prompts for the Blueprint secrets. To enable translated captions, also provide `GOOGLE_TRANSLATE_API_KEY`. Use the public `wss://` URL from LiveKit Cloud; do not use the local Docker hostname.
+3. Provide `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` when Render prompts for the Blueprint secrets. Free Argos translation is configured by default; no translation API key is needed. Use the public `wss://` URL from LiveKit Cloud; do not use the local Docker hostname.
 4. Deploy and wait for the `/health` check to pass. Open the assigned `https://<service-name>.onrender.com` URL, create a meeting, then share that meeting's generated URL.
 5. Optionally set `GEMINI_API_KEY` in the Render service settings. For a custom domain, configure it in Render and set `PUBLIC_APP_URL` to its HTTPS origin.
 
@@ -125,7 +132,7 @@ The gateway handles web traffic and signaling; browsers connect to LiveKit separ
 - **Network reachability:** LiveKit Cloud or another public SFU/TURN-capable service is needed for reliable media across different networks. Device permissions, unsupported browsers, or restrictive networks can still prevent a call.
 - **Database scale:** SQLite on a Render disk supports one service instance. For multiple gateway instances, migrate to a shared database such as PostgreSQL and add shared coordination for room state.
 - **Service credentials:** Do not commit `.env` files or paste production secrets into source files. Configure secrets in Render.
-- **AI features:** Copilot and speech/translation behavior depend on the relevant API key, browser capabilities, and model/service availability.
+- **AI features:** Copilot may use an API key; speech captions depend on browser/device support. Argos translation depends on installed language models and gateway CPU/RAM.
 
 ## Troubleshooting
 
@@ -134,4 +141,3 @@ The gateway handles web traffic and signaling; browsers connect to LiveKit separ
 - **Meeting records disappear after restart:** Confirm the Render disk is mounted at `/app/data` and `SQLITE_DB_PATH` is `/app/data/omnimeet.db`.
 - **Copilot has no hosted responses:** Configure `GEMINI_API_KEY` in the environment and redeploy/restart the service.
 - **Camera or microphone is unavailable:** Allow browser permissions, select the correct device, and use HTTPS for remote access.
-
