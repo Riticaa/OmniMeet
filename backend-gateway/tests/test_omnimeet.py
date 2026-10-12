@@ -252,6 +252,25 @@ def test_translation_endpoint_reports_unavailable_provider(monkeypatch):
     assert res.json() == {"translatedText": "Bonjour tout le monde", "translated": False}
 
 
+def test_translation_endpoint_rejects_unchanged_text_as_a_translation(monkeypatch):
+    """A provider returning the source verbatim must not be shown as translated."""
+    class IdentityProvider:
+        def translate(self, text, _source, _target):
+            return {"translated_text": text}
+
+    monkeypatch.setattr(main, "translation_engine", IdentityProvider())
+    res = client.post("/api/translate", json={
+        "text": "Bonjour à tous, bienvenue à la réunion d'aujourd'hui.",
+        "sourceLanguage": "es",
+        "targetLanguage": "en",
+    })
+    assert res.status_code == 200
+    assert res.json() == {
+        "translatedText": "Bonjour à tous, bienvenue à la réunion d'aujourd'hui.",
+        "translated": False,
+    }
+
+
 def test_google_cloud_translation_uses_server_side_api_key(monkeypatch):
     """The optional paid provider runs only when explicitly selected."""
     class FakeResponse:
