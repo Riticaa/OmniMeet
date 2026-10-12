@@ -672,9 +672,25 @@ function updatePipelineStatusIndicator() {
   } else if (state.aiPipelineStatus.loading) {
     speechRecognitionStatus.textContent = "Loading local speech models; browser speech recognition remains available.";
   } else if (state.aiPipelineStatus.error) {
-    speechRecognitionStatus.textContent = "Local speech pipeline unavailable; using browser speech recognition.";
+    if (!state.speechRecognition) {
+      speechRecognitionStatus.textContent = "Speech recognition is unavailable in this browser. Use Chrome or Edge, or enable the server speech pipeline.";
+    } else if (state.speechRecognitionBlocked) {
+      speechRecognitionStatus.textContent = "Microphone access is blocked. Allow it for this site, then reload.";
+    } else if (state.isMuted) {
+      speechRecognitionStatus.textContent = "Unmute your microphone to start live captions.";
+    } else {
+      speechRecognitionStatus.textContent = "Local speech pipeline unavailable; browser speech recognition is being used.";
+    }
+  } else if (!state.speechRecognition) {
+    speechRecognitionStatus.textContent = "Speech recognition is unavailable in this browser. Use the speech test bar below.";
+  } else if (state.speechRecognitionBlocked) {
+    speechRecognitionStatus.textContent = "Microphone access is blocked. Allow it for this site, then reload.";
+  } else if (state.isMuted) {
+    speechRecognitionStatus.textContent = "Unmute your microphone to start live captions.";
+  } else if (state.isRecognizing) {
+    speechRecognitionStatus.textContent = `Listening for ${getLanguageName(state.sourceLang)} speech…`;
   } else {
-    speechRecognitionStatus.textContent = "Web Speech recognition active • Multi-language translation ready";
+    speechRecognitionStatus.textContent = `Browser speech recognition ready for ${getLanguageName(state.sourceLang)}.`;
   }
 }
 
@@ -1027,6 +1043,23 @@ function updateParticipantCount() {
 //  CAMERA, MICROPHONE & SCREEN SHARE MANAGEMENT
 // ============================================================
 
+function describeMediaError(error, deviceName) {
+  const device = deviceName || "media device";
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return `This browser cannot access the ${device}. Open OmniMeet in Chrome or Edge on localhost or HTTPS.`;
+  }
+  if (error?.name === "NotAllowedError" || error?.name === "SecurityError") {
+    return `Allow ${device} access for this site, then try again.`;
+  }
+  if (error?.name === "NotFoundError" || error?.name === "OverconstrainedError") {
+    return `No available ${device} matches the selected device.`;
+  }
+  if (error?.name === "NotReadableError" || error?.name === "AbortError") {
+    return `The ${device} is busy. Close other apps using it and try again.`;
+  }
+  return `${device} unavailable${error?.message ? `: ${error.message}` : "."}`;
+}
+
 async function toggleMicrophone() {
   if (state.isMuted) {
     state.isMuted = false;
@@ -1110,7 +1143,7 @@ async function startAudioCapture() {
     processor.connect(state.audioContext.destination);
   } catch (err) {
     console.warn("[Media] Microphone permission / device error:", err);
-    showToast("Microphone access unavailable or denied");
+    showToast(describeMediaError(err, "microphone"));
   }
 }
 
@@ -1186,7 +1219,7 @@ async function toggleCamera() {
       showToast("Camera enabled");
     } catch (err) {
       console.warn("[Media] Camera access error:", err);
-      showToast("Camera unavailable: " + (err.message || "permission denied"));
+      showToast(describeMediaError(err, "camera"));
     }
   }
 
@@ -2054,7 +2087,7 @@ function setupWebSpeechRecognition() {
     state.isRecognizing = true;
     state.speechRecognitionBlocked = false;
     state.speechRestartAttempts = 0;
-    if (speechRecognitionStatus) speechRecognitionStatus.textContent = "Live speech captions are active.";
+    updatePipelineStatusIndicator();
   };
 
   rec.onend = () => {
@@ -2088,6 +2121,9 @@ function setupWebSpeechRecognition() {
       showToast("Allow microphone access in your browser to enable live captions.");
     } else if (e.error !== "no-speech" && speechRecognitionStatus) {
       speechRecognitionStatus.textContent = `Speech recognition paused (${e.error}). Check your connection and microphone.`;
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      updatePipelineStatusIndicator();
+    }
     }
   };
 
@@ -3060,7 +3096,7 @@ async function toggleLobbyCamera() {
       if (lobbyPreviewImg) lobbyPreviewImg.classList.add("hidden");
       lobbyToggleCamBtn?.classList.add("active");
     } catch (err) {
-      showToast("Camera unavailable: " + err.message);
+      showToast(describeMediaError(err, "camera"));
     }
   }
 }
