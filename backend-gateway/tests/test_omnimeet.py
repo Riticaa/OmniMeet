@@ -253,7 +253,7 @@ def test_translation_endpoint_reports_unavailable_provider(monkeypatch):
 
 
 def test_google_cloud_translation_uses_server_side_api_key(monkeypatch):
-    """Configured Cloud Translation responses are consumed without a live network call."""
+    """The optional paid provider runs only when explicitly selected."""
     class FakeResponse:
         def __enter__(self):
             return self
@@ -273,6 +273,7 @@ def test_google_cloud_translation_uses_server_side_api_key(monkeypatch):
         return FakeResponse()
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setenv("TRANSLATION_PROVIDER", "google")
     engine = TranslationEngine()
     engine.google_cloud_api_key = "test-only-key"
     result = engine.translate("Bonjour tout le monde", "fr", "en")
@@ -282,6 +283,61 @@ def test_google_cloud_translation_uses_server_side_api_key(monkeypatch):
     assert "test-only-key" in seen["url"]
     assert seen["body"] == {"q": "Bonjour tout le monde", "target": "en", "format": "text", "source": "fr"}
     assert seen["timeout"] == 6.0
+
+
+def test_argos_is_the_default_free_translation_provider(monkeypatch):
+    monkeypatch.setenv("TRANSLATION_PROVIDER", "argos")
+    engine = TranslationEngine()
+    monkeypatch.setattr(engine, "_translate_with_argos", lambda *_args: "Hola a todos")
+    monkeypatch.setattr(engine, "_translate_with_google_cloud", lambda *_args: pytest.fail("paid provider called"))
+
+    result = engine.translate("Hello everyone", "en", "es")
+    assert engine.translation_provider == "argos"
+    assert result["translated_text"] == "Hola a todos"
+
+
+def test_argos_installs_a_missing_pair_on_first_use(monkeypatch):
+    from types import ModuleType, SimpleNamespace
+
+    installed = set()
+
+    class FakeTranslation:
+        def translate(self, _text):
+            return "Bonjour le monde"
+
+    class FakeLanguage:
+        def __init__(self, code):
+            self.code = code
+
+        def get_translation(self, target):
+            return FakeTranslation() if (self.code, target.code) in installed else None
+
+    class FakeAvailablePackage:
+        from_code = "en"
+        to_code = "fr"
+
+        def install(self):
+            installed.add((self.from_code, self.to_code))
+
+    class FakePackageModule:
+        def get_available_packages(self):
+            return [FakeAvailablePackage()]
+
+        def get_installed_packages(self):
+            return [SimpleNamespace(from_code=source, to_code=target) for source, target in installed]
+
+    fake_translate = SimpleNamespace(
+        get_language_from_code=lambda code: FakeLanguage(code),
+        get_installed_languages=SimpleNamespace(cache_clear=lambda: None),
+    )
+    fake_argos = ModuleType("argostranslate")
+    fake_argos.package = FakePackageModule()
+    fake_argos.translate = fake_translate
+    monkeypatch.setitem(sys.modules, "argostranslate", fake_argos)
+
+    engine = TranslationEngine()
+    assert engine._translate_with_argos("Hello world", "en", "fr") == "Bonjour le monde"
+    assert ("en", "fr") in installed
 
 
 def test_webrtc_config_endpoint():
