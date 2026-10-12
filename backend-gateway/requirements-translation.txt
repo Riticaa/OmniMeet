@@ -1,0 +1,7 @@
+# Runtime dependencies for Argos' CPU translation models. We install the
+# Argos package itself separately with --no-deps to skip optional spaCy/Stanza.
+ctranslate2>=4.0,<5
+sentencepiece>=0.2,<0.3
+minisbd>=0.9
+sacremoses>=0.0.53,<0.2
+onnxruntime>=1.16
