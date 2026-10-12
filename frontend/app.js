@@ -3136,8 +3136,12 @@ function detectPhraseLanguage(text) {
   if (!text) return "en";
   if (/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(text)) return "ja";
   if (/[\u0900-\u097F]/.test(text)) return "hi";
-  if (/[áéíóúüñ¿¡]/i.test(text) || /\b(hola|gracias|podemos|equipo|pruebas)\b/i.test(text)) return "es";
-  if (/[àâçéèêëîïôûùüÿœæ]/i.test(text) || /\b(bonjour|merci|réunion|tous)\b/i.test(text)) return "fr";
+  // French "é" is also used in Spanish, so distinguish common French phrases
+  // before using language-specific accents as a fallback.
+  if (/\b(bonjour|merci|réunion|tous|bienvenue|aujourd\x27hui)\b/i.test(text)) return "fr";
+  if (/\b(hola|gracias|podemos|equipo|pruebas|todos|reunión)\b/i.test(text)) return "es";
+  if (/[àâçèêëîïôûùÿœæ]/i.test(text)) return "fr";
+  if (/[áíóúüñ¿¡]/i.test(text)) return "es";
   if (/[äöüß]/i.test(text) || /\b(guten|tag|können|wir)\b/i.test(text)) return "de";
   return state.sourceLang || "en";
 }
